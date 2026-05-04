@@ -23,9 +23,19 @@ RUN apt-get update && \
         tesseract-ocr \
         libgl1 \
         media-types \
-        mailcap && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+        mailcap \
+	&& apt-get clean \
+	&& rm -rf /var/lib/apt/lists/*
+
+# Necessari per unstructured[all-docs] in grinning-cat-plus plugin
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libreoffice*nogui \
+        pandoc \
+        ffmpeg \
+        tesseract-ocr-{ita,eng} \
+	&& apt-get clean \
+	&& rm -rf /var/lib/apt/lists/*
 
 # 4. Dipendenze Python: Copiamo solo i manifesti per sfruttare la cache
 COPY pyproject.toml uv.lock ./
