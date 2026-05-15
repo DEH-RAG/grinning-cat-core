@@ -4,6 +4,9 @@ __pycache__
 *mypy_cache
 *.pytest_cache
 
+# opencode
+.sisyphus/
+
 # python local dev
 venv
 .venv
