@@ -1,4 +1,6 @@
 import asyncio
+import json
+import uuid
 from typing import List, Dict
 from fastapi import FastAPI
 
@@ -15,6 +17,7 @@ from cat.looking_glass.mad_hatter.mad_hatter import MadHatter
 from cat.looking_glass.mad_hatter.registry import PluginRegistry
 from cat.mixins import OrchestratorMixin, NonCopyableMixin
 from cat.rabbit_hole import RabbitHole
+from cat.services.memory.models import PointStruct
 from cat.services.factory.auth_handler import CoreAuthHandler
 from cat.services.websocket_manager import WebSocketManager
 from cat.utils import singleton, safe_deepcopy, sanitize_permissions
@@ -222,17 +225,20 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
         return cloned_ccat  # type: ignore[return-value]
 
     async def embed_all_in_cheshire_cats(self) -> None:
-        """Re-embeds all the stored files and procedures in all the Cheshire Cats using the current embedder."""
-        async def embed_with_limit(entry_):
-            async with semaphore:
-                # re-embed all the stored files
-                tasks = [
-                    entry_["ccat"].embed_stored_sources(collection_name, sources)
-                    for collection_name, sources in entry_["stored_sources"].items()
-                    if sources
-                ] + [entry_["ccat"].embed_procedures()]
-                await asyncio.gather(*tasks)
+        """Re-embed all vectors across all agents when the embedder changes.
 
+        Strategy (zero-downtime):
+        1. Read existing chunks directly from the old Qdrant collections
+        2. Batch-recalculate embeddings with the new embedder
+        3. Write to a new embedder-specific collection
+        4. Atomically swap the stable alias (``declarative``, …) to point at
+           the new collection
+        5. Delete the old collection
+
+        Unlike the previous approach (delete → re-ingest via rabbit hole),
+        this preserves all metadata, avoids re-parsing source files, and
+        leaves the old data accessible via alias until the swap completes.
+        """
         success = False
         try:
             embedder = await self.embedder()
@@ -240,27 +246,90 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
             embedder_size = embedder.size
 
             ccat_ids = await crud_settings.get_agents_main_keys()
-            stored_files_by_ccat: List[Dict] = []
-            # first, I need to get all the stored files from all the Cheshire Cats with the metadata stored
-            # within the vector memory; I do not remove anything from the latter to avoid any race condition
+
             for ccat_id in ccat_ids:
                 if (ccat := await self.get_cheshire_cat(ccat_id)) is None:
                     continue
 
-                stored_files_by_ccat.append({
-                    "ccat": ccat,
-                    "stored_sources": await ccat.get_stored_sources_with_metadata(),
-                })
+                vdb = ccat.vector_memory_handler
 
-            # now, I have to re-initialize all the vector databases in a serialized way, outside threads to avoid
-            # race conditions
-            for entry in stored_files_by_ccat:
-                await entry["ccat"].vector_memory_handler.initialize(embedder_name, embedder_size)
+                # ── ensure the new embedder-specific collections exist ──────
+                await vdb.initialize(embedder_name, embedder_size, set_aliases=False)
 
-                # finally, I can re-embed all the stored files in an asynchronous way
-                # limit concurrent embeddings to avoid overwhelming resources
-                semaphore = asyncio.Semaphore(5)  # Max 5 concurrent
-                await asyncio.gather(*[embed_with_limit(entry) for entry in stored_files_by_ccat])
+                for collection_type in vdb._collection_names:
+                    alias_name = collection_type          # e.g. "declarative"
+                    new_real = vdb._get_real_collection_name(embedder_name, collection_type)
+
+                    # where does the alias currently point?
+                    old_real = await vdb._get_alias_target(alias_name)
+
+                    if old_real is None:
+                        # first startup – nothing to migrate, just set the alias
+                        await vdb._set_alias(alias_name, new_real)
+                        continue
+
+                    if old_real == new_real:
+                        # already the correct embedder
+                        continue
+
+                    # ── read all old points (page_content + metadata) ────────
+                    old_points, _ = await vdb.get_all_tenant_points(
+                        old_real, with_vectors=False,
+                    )
+
+                    if old_points:
+                        texts = []
+                        payloads = []
+                        for p in old_points:
+                            content = p.payload.get("page_content", "")
+                            if isinstance(content, dict):
+                                content = json.dumps(content)
+                            texts.append(content)
+                            payloads.append(p.payload)
+
+                        # batch-re-embed
+                        vectors = await asyncio.to_thread(
+                            embedder.embed_documents, texts,
+                        )
+
+                        new_points = [
+                            PointStruct(
+                                id=uuid.uuid4().hex,
+                                vector=v,
+                                payload=payloads[i],
+                            )
+                            for i, v in enumerate(vectors)
+                        ]
+
+                        # write to the new collection
+                        await vdb.add_points_to_tenant(
+                            collection_name=new_real, points=new_points,
+                        )
+
+                        # ── fire per-source hooks (analytics + webhooks) ───
+                        source_groups: Dict[str, List[PointStruct]] = {}
+                        for p in new_points:
+                            meta = (p.payload or {}).get("metadata", {}) or {}
+                            src = meta.get("source", "") or ""
+                            if src:
+                                source_groups.setdefault(src, []).append(p)
+                        for source, pts in source_groups.items():
+                            await ccat.plugin_manager.execute_hook(
+                                "after_rabbithole_stored_documents",
+                                source, pts,
+                                caller=ccat,
+                            )
+
+                    # ── snapshot + atomic alias swap ─────────────────────────
+                    if vdb.save_memory_snapshots:
+                        await vdb.save_dump(old_real)
+                    await vdb._set_alias(alias_name, new_real)
+
+                    # ── delete the old collection ────────────────────────────
+                    await vdb.delete_collection(old_real)
+
+                # re-embed procedures (read from current plugin state)
+                await ccat.embed_procedures()
 
             success = True
         except Exception as e:
