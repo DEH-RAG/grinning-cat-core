@@ -19,6 +19,8 @@ from qdrant_client.http.models import (
     ScalarType,
     CreateAliasOperation,
     CreateAlias,
+    DeleteAliasOperation,
+    DeleteAlias,
     OptimizersConfigDiff,
     PayloadSchemaType,
     Filter,
@@ -116,15 +118,53 @@ class BaseVectorDatabaseHandler(ABC):
         """
         pass
 
-    @abstractmethod
-    async def initialize(self, embedder_name: str, embedder_size: int):
+    async def initialize(self, embedder_name: str, embedder_size: int, set_aliases: bool = True):
+        """Ensure embedder-specific collections exist and their aliases are set.
+
+        Creates any missing ``{embedder}_{type}`` collections.  When
+        *set_aliases* is ``True`` (first startup / clone / transfer) the stable
+        alias (``declarative``, …) is also created.  Pass ``set_aliases=False``
+        during re-embed so the alias is NOT moved away from the old collection
+        before data migration completes.
+
+        Subclasses that do not support aliases should override this method.
         """
-        Initializes the vector database with the specified embedder name and size.
-        Args:
-            embedder_name: str, the name of the embedder to use.
-            embedder_size: int, the size of the vector embeddings.
+        for collection_type in self._collection_names:
+            real_name = self._get_real_collection_name(embedder_name, collection_type)
+            if not await self.check_collection_existence(real_name):
+                await self.create_collection(embedder_name, embedder_size, collection_type)
+            if set_aliases:
+                await self._ensure_alias(collection_type, real_name)
+
+    async def _set_alias(self, alias_name: str, target_collection_name: str):
+        """Atomically point *alias_name* to *target_collection_name*.
+
+        If the alias already exists on another collection it should be moved
+        atomically (no window where the alias is missing).  Subclasses that
+        support aliases MUST override this method.
         """
-        pass
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support collection aliases"
+        )
+
+    async def _ensure_alias(self, alias_name: str, target_collection_name: str):
+        """Ensure *alias_name* exists and points to *target_collection_name*.
+
+        No-op if the alias already points to the right target.  Subclasses
+        that support aliases MUST override this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support collection aliases"
+        )
+
+    async def _get_alias_target(self, alias_name: str) -> str | None:
+        """Return the real collection name that *alias_name* points to, or None.
+
+        Subclasses that support aliases MUST override this method.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support collection aliases"
+        )
 
     @abstractmethod
     def is_db_remote(self) -> bool:
@@ -575,29 +615,6 @@ class QdrantHandler(BaseVectorDatabaseHandler):
     def client(self):
         return self._client
 
-    async def initialize(self, embedder_name: str, embedder_size: int):
-        """
-        Initializes the vector database with the specified embedder name and size.
-        Args:
-            embedder_name: str, the name of the embedder to use.
-            embedder_size: int, the size of the vector embeddings.
-        """
-        for collection_name in self._collection_names:
-            is_collection_existing = await self.check_collection_existence(collection_name)
-            has_same_size = (
-                await self._check_embedding_size(embedder_name, embedder_size, collection_name)
-            ) if is_collection_existing else False
-            if is_collection_existing and has_same_size:
-                continue
-
-            # dump collection on disk before deleting
-            if self.save_memory_snapshots:
-                await self.save_dump(collection_name)
-
-            if is_collection_existing:
-                await self.delete_collection(collection_name=collection_name)
-            await self.create_collection(embedder_name, embedder_size, collection_name)
-
     def tenant_field_condition(self) -> FieldCondition:
         return FieldCondition(key="tenant_id", match=MatchValue(value=self.agent_id))
 
@@ -637,31 +654,43 @@ class QdrantHandler(BaseVectorDatabaseHandler):
         return False
 
     @staticmethod
-    def _get_local_alias(embedder_name: str, collection_name: str) -> str:
-        return f"{embedder_name}_{collection_name}"
+    def _get_local_alias(embedder_name: str, collection_type: str) -> str:
+        """Returns the stable alias name (not embedder-specific) used by all code at query time."""
+        return collection_type
 
-    async def _check_embedding_size(self, embedder_name: str, embedder_size: int, collection_name: str) -> bool:
-        # having the same size does not necessarily imply being the same embedder
-        # having vectors with the same size but from different embedder in the same vector space is wrong
-        collection_vector_size = (await self._client.get_collection(collection_name=collection_name)).config.params.vectors.size  # type: ignore[attr-defined]
+    @staticmethod
+    def _get_real_collection_name(embedder_name: str, collection_type: str) -> str:
+        """Returns the embedder-specific unique collection name."""
+        return f"{embedder_name}_{collection_type}"
+
+    async def _check_embedding_size(self, embedder_name: str, embedder_size: int, collection_type: str) -> bool:
+        real_name = self._get_real_collection_name(embedder_name, collection_type)
+        if not await self.check_collection_existence(real_name):
+            log.warning(f"Collection `{real_name}` for the agent `{self.agent_id}` does not exist")
+            return False
+        collection_vector_size = (await self._client.get_collection(collection_name=real_name)).config.params.vectors.size  # type: ignore[attr-defined]
         same_size = collection_vector_size == embedder_size
-        local_alias = self._get_local_alias(embedder_name, collection_name)
+        if same_size:
+            log.debug(f"Collection `{real_name}` for the agent `{self.agent_id}` has the same embedder")
+        else:
+            log.warning(f"Collection `{real_name}` for the agent `{self.agent_id}` has different embedder")
+        return same_size
 
-        existing_aliases = (await self._client.get_collection_aliases(collection_name=collection_name)).aliases  # type: ignore[attr-defined]
+    async def create_collection(self, embedder_name: str, embedder_size: int, collection_type: str):
+        """Create an embedder-specific collection and its stable alias.
 
-        if same_size and existing_aliases and local_alias == existing_aliases[0].alias_name:
-            log.debug(f"Collection `{collection_name}` for the agent `{self.agent_id}` has the same embedder")
-            return True
-
-        log.warning(f"Collection `{collection_name}` for the agent `{self.agent_id}` has different embedder")
-        return False
-
-    async def create_collection(self, embedder_name: str, embedder_size: int, collection_name: str):
-        log.warning(f"Creating collection `{collection_name}` for the agent `{self.agent_id}`...")
+        The real collection name is ``{embedder_name}_{collection_type}``.
+        The stable alias is ``{collection_type}`` (e.g. ``declarative``) — all
+        production code queries through the alias, making zero-downtime
+        re-embedding possible.
+        """
+        real_name = self._get_real_collection_name(embedder_name, collection_type)
+        alias_name = self._get_local_alias(embedder_name, collection_type)  # = collection_type
+        log.warning(f"Creating collection `{real_name}` for the agent `{self.agent_id}`...")
 
         try:
             await self._client.create_collection(  # type: ignore[attr-defined]
-                collection_name=collection_name,
+                collection_name=real_name,
                 vectors_config=VectorParams(size=embedder_size, distance=Distance.COSINE),
                 # hybrid mode: original vector on Disk, quantized vector in RAM
                 optimizers_config=OptimizersConfigDiff(memmap_threshold=20000, indexing_threshold=20000),
@@ -674,40 +703,84 @@ class QdrantHandler(BaseVectorDatabaseHandler):
             )
         except Exception as e:
             log.error(
-                f"Error creating collection `{collection_name}` for the agent `{self.agent_id}`. Try setting a higher timeout value: {e}"
+                f"Error creating collection `{real_name}` for the agent `{self.agent_id}`. Try setting a higher timeout value: {e}"
             )
             raise
 
-        alias_name = self._get_local_alias(embedder_name, collection_name)
-        log.warning(f"Creating alias `{alias_name}` for collection `{collection_name}` and the agent `{self.agent_id}`...")
+        log.warning(f"Creating alias `{alias_name}` for collection `{real_name}` and the agent `{self.agent_id}`...")
         try:
-            await self._client.update_collection_aliases(  # type: ignore[attr-defined]
-                change_aliases_operations=[
-                    CreateAliasOperation(
-                        create_alias=CreateAlias(
-                            collection_name=collection_name,
-                            alias_name=alias_name,
-                        )
-                    )
-                ]
-            )
+            await self._set_alias(alias_name, real_name)
         except Exception as e:
-            log.error(f"Error creating collection alias `{alias_name}` for collection `{collection_name}` and the agent `{self.agent_id}`: {e}")
-            await self._client.delete_collection(collection_name)  # type: ignore[attr-defined]
-            log.error(f"Collection `{collection_name}` for the agent `{self.agent_id}` deleted")
+            log.error(f"Error creating collection alias `{alias_name}` for collection `{real_name}`: {e}")
+            await self._client.delete_collection(real_name)  # type: ignore[attr-defined]
             raise e
 
         # if the client is remote, create an index on the tenant_id field
         if self.is_db_remote():
-            log.warning(f"Creating payload index for collection `{collection_name}` and the agent `{self.agent_id}`...")
+            log.warning(f"Creating payload index for collection `{real_name}` and the agent `{self.agent_id}`...")
             try:
                 await self._client.create_payload_index(  # type: ignore[attr-defined]
-                    collection_name=collection_name,
+                    collection_name=real_name,
                     field_name="tenant_id",
                     field_schema=PayloadSchemaType.KEYWORD
                 )
             except Exception as e:
                 log.error(f"Error when creating a schema index: {e}")
+
+    async def _set_alias(self, alias_name: str, target_collection_name: str):
+        """Atomically set or move an alias to point to target collection.
+
+        If the alias already exists on another collection it is moved atomically
+        in a single Qdrant operation (no window where the alias is missing).
+        """
+        try:
+            # Fast path – alias does not exist yet
+            await self._client.update_collection_aliases(  # type: ignore[attr-defined]
+                change_aliases_operations=[
+                    CreateAliasOperation(
+                        create_alias=CreateAlias(
+                            collection_name=target_collection_name,
+                            alias_name=alias_name,
+                        )
+                    )
+                ]
+            )
+        except Exception:
+            # Alias already exists → move it atomically
+            await self._client.update_collection_aliases(  # type: ignore[attr-defined]
+                change_aliases_operations=[
+                    DeleteAliasOperation(delete_alias=DeleteAlias(alias_name=alias_name)),
+                    CreateAliasOperation(
+                        create_alias=CreateAlias(
+                            collection_name=target_collection_name,
+                            alias_name=alias_name,
+                        )
+                    ),
+                ]
+            )
+
+    async def _ensure_alias(self, alias_name: str, target_collection_name: str):
+        try:
+            existing = (await self._client.get_collection_aliases(  # type: ignore[attr-defined]
+                collection_name=target_collection_name
+            )).aliases
+            if any(a.alias_name == alias_name for a in existing):
+                return
+        except Exception:
+            pass
+        await self._set_alias(alias_name, target_collection_name)
+
+    async def _get_alias_target(self, alias_name: str) -> str | None:
+        """Return the real collection name that *alias_name* currently points to, or None."""
+        collections = (await self._client.get_collections()).collections  # type: ignore[attr-defined]
+        for col in collections:
+            try:
+                aliases = (await self._client.get_collection_aliases(collection_name=col.name)).aliases  # type: ignore[attr-defined]
+                if any(a.alias_name == alias_name for a in aliases):
+                    return col.name
+            except Exception:
+                continue
+        return None
 
     async def create_hybrid_collection(
         self, collection_name: str, dense_vector_config_name: str, sparse_vector_config_name: str
@@ -1089,9 +1162,11 @@ class QdrantHandler(BaseVectorDatabaseHandler):
     def is_db_remote(self) -> bool:
         return True
 
+    async def check_collection_existence(self, collection_name: str) -> bool:
+        return await self._client.collection_exists(collection_name)  # type: ignore[attr-defined]
+
     async def get_collection_names(self) -> List[str]:
-        collections_response = await self._client.get_collections()  # type: ignore[attr-defined]
-        return [c.name for c in collections_response.collections]
+        return [str(v) for v in VectorMemoryType]
 
     async def search_in_tenant(
         self,
