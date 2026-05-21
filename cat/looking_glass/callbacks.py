@@ -108,6 +108,15 @@ class WebSocketCallbackManager(AsyncCallbackHandler):
                 # Do NOT also emit a chat_token for this chunk.
                 return
 
+        # 1.5 ── reasoning_content via additional_kwargs (OpenAI-compatible streaming) ──
+        if chunk is not None and hasattr(chunk, "message") and hasattr(chunk.message, "additional_kwargs"):
+            reasoning = chunk.message.additional_kwargs.get("reasoning_content", "")
+            if reasoning:
+                msg = ThinkingMessage(content=reasoning, step=self._thinking_step)
+                await self.notifier.send_llm_thinking(msg.model_dump_json())
+                self._thinking_streamed = True
+                return
+
         # 2 ── DeepSeek / <think> tag style ───────────────────────────────────
         if "<think>" in token or self._in_thinking_block:
             await self._handle_think_tagged_token(token)

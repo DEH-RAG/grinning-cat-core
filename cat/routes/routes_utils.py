@@ -244,6 +244,10 @@ async def startup_app(app):
     await bill_the_lizard.bootstrap()
     app.state.lizard = bill_the_lizard
 
+    # Apply monkeypatch after all plugins and their dependencies are loaded.
+    from cat.startup import patch_reasoning_content_monkeypatch
+    patch_reasoning_content_monkeypatch()
+
 
 async def shutdown_app(app):
     utils.singleton.instances.clear()

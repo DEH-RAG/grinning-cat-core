@@ -37,6 +37,33 @@ from cat.routes.openapi import get_openapi_configuration_function
 from cat.routes.routes_utils import startup_app, shutdown_app
 
 
+def patch_reasoning_content_monkeypatch() -> None:
+    """Propagate OpenAI reasoning_content from streaming delta to additional_kwargs.
+
+    LangChain's _convert_delta_to_message_chunk only extracts content, function_call,
+    and tool_calls, silently dropping reasoning_content. This monkeypatch adds it
+    so WebSocketCallbackManager.on_llm_new_token can emit it as llm_thinking.
+
+    Must be called AFTER all plugins and their dependencies are loaded (plugins may
+    install/replace langchain-community).
+    """
+    try:
+        from langchain_community.chat_models import openai as openai_llm
+
+        _original_convert = openai_llm._convert_delta_to_message_chunk
+
+        def _patched_convert_delta_to_message_chunk(_dict, default_class):
+            result = _original_convert(_dict, default_class)
+            reasoning_content = _dict.get("reasoning_content")
+            if reasoning_content:
+                result.additional_kwargs["reasoning_content"] = reasoning_content
+            return result
+
+        openai_llm._convert_delta_to_message_chunk = _patched_convert_delta_to_message_chunk
+    except ImportError:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     #       ^._.^
