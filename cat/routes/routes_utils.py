@@ -7,7 +7,7 @@ from typing import Dict, List, Any, Type
 from fastapi import Query, BackgroundTasks
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
-from pydantic import BaseModel, model_serializer
+from pydantic import BaseModel
 
 from cat import utils
 from cat.auth.permissions import AuthPermission
@@ -62,30 +62,9 @@ class UpsertSettingResponse(BaseModel):
     name: str
     value: Dict
 
-    @model_serializer
-    def serialize_model(self) -> Dict[str, Any]:
-        """Custom serializer that will be used by FastAPI"""
-        value = self.value.copy()  # Create a copy to avoid modifying the original value
-        value = {
-            k: "********" if isinstance(v, str) and any(suffix in k for suffix in ["_key", "_secret"]) else v
-            for k, v in value.items()
-        }
-
-        return {
-            "name": self.name,
-            "value": value
-        }
-
 
 class GetSettingResponse(UpsertSettingResponse):
     scheme: Dict[str, Any] | None = None
-
-    @model_serializer
-    def serialize_model(self) -> Dict[str, Any]:
-        """Custom serializer that will be used by FastAPI"""
-        serialized = super().serialize_model()
-        serialized["scheme"] = self.scheme
-        return serialized
 
 
 class GetSettingsResponse(BaseModel):
