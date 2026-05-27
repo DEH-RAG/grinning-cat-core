@@ -80,23 +80,33 @@ class ServiceFactory:
         factory_class = next((cls for cls in classes if cls.__name__ == config_name), None)
         return factory_class
 
+    async def _set_agent_id(self, obj: Any) -> None:
+        if hasattr(obj, "agent_id"):
+            obj.agent_id = self._agent_key
+
     async def get_from_config_name(self, config_name: str) -> Any:
         factory_class = await self._get_factory_class(config_name)
         if not factory_class:
             log.warning(
                 f"Class {config_name} not found in the list of allowed classes for setting '{self.setting_category}'"
             )
-            return self.default_config_class.get_from_config(self.default_config)
+            default_obj = self.default_config_class.get_from_config(self.default_config)
+            await self._set_agent_id(default_obj)
+            return default_obj
 
         # get configuration and instantiate the finalized object by the factory
         selected_config = await crud_settings.get_setting_by_name(self._agent_key, config_name)
         try:
             obj = factory_class.get_from_config(selected_config["value"])  # type: ignore[index]
-            if hasattr(obj, "agent_id"):
-                obj.agent_id = self._agent_key
+            await self._set_agent_id(obj)
             return obj
-        except:
-            return self.default_config_class.get_from_config(self.default_config)
+        except Exception as e:
+            log.error(
+                f"Failed to instantiate {config_name} for agent '{self._agent_key}': {e}"
+            )
+            default_obj = self.default_config_class.get_from_config(self.default_config)
+            await self._set_agent_id(default_obj)
+            return default_obj
 
     async def _get_allowed_classes(self) -> List[Type[BaseFactoryConfigModel]]:
         return await self._hook_manager.execute_hook(
