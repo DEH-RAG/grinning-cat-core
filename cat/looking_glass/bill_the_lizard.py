@@ -17,7 +17,7 @@ from cat.mixins import OrchestratorMixin, NonCopyableMixin
 from cat.rabbit_hole import RabbitHole
 from cat.services.factory.auth_handler import CoreAuthHandler
 from cat.services.websocket_manager import WebSocketManager
-from cat.utils import singleton, safe_deepcopy, sanitize_permissions
+from cat.utils import singleton, safe_deepcopy, sanitize_permissions, is_url
 
 
 @singleton
@@ -222,17 +222,17 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
         return cloned_ccat  # type: ignore[return-value]
 
     async def embed_all_in_cheshire_cats(self) -> None:
-        """Re-embeds all the stored files and procedures in all the Cheshire Cats using the current embedder."""
-        async def embed_with_limit(entry_):
-            async with semaphore:
-                # re-embed all the stored files
-                tasks = [
-                    entry_["ccat"].embed_stored_sources(collection_name, sources)
-                    for collection_name, sources in entry_["stored_sources"].items()
-                    if sources
-                ] + [entry_["ccat"].embed_procedures()]
-                await asyncio.gather(*tasks)
+        """Re-embeds all stored files, URLs and procedures in all the Cheshire Cats
+        using the current embedder.
 
+        Phases (applied horizontally — each phase runs against ALL agents before the next):
+          0. Gather  — read source names + metadata from existing memory points
+          1. Delete  — drop ALL vector collections from every agent's handler
+          3. Create  — recreate every collection with the current embedder dimensions
+          4. Files   — re-ingest stored files with their original metadata
+          5. URLs    — re-download and re-ingest URLs, refreshing stale metadata
+          6. Tools   — re-embed procedures / tool documents
+        """
         success = False
         try:
             embedder = await self.embedder()
@@ -241,8 +241,8 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
 
             ccat_ids = await crud_settings.get_agents_main_keys()
             stored_files_by_ccat: List[Dict] = []
-            # first, I need to get all the stored files from all the Cheshire Cats with the metadata stored
-            # within the vector memory; I do not remove anything from the latter to avoid any race condition
+
+            # ── Phase 0: gather stored sources BEFORE any destruction ──────
             for ccat_id in ccat_ids:
                 if (ccat := await self.get_cheshire_cat(ccat_id)) is None:
                     continue
@@ -252,16 +252,68 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
                     "stored_sources": await ccat.get_stored_sources_with_metadata(),
                 })
 
-            # now, I have to re-initialize all the vector databases in a serialized way, outside threads to avoid
-            # race conditions
+            # separate files from URLs per collection
+            # so that phases 4 and 5 only handle their respective type
             for entry in stored_files_by_ccat:
-                await entry["ccat"].vector_memory_handler.initialize(embedder_name, embedder_size)
+                files = {}
+                urls = {}
+                for collection_name, sources in entry["stored_sources"].items():
+                    file_list = []
+                    url_list = []
+                    for s in sources:
+                        if is_url(s.name):
+                            # strip stale metadata fields that are re-calculated on ingestion
+                            s.metadata = {k: v for k, v in s.metadata.items()
+                                          if k not in ("when", "hash")}
+                            url_list.append(s)
+                        else:
+                            file_list.append(s)
+                    if file_list:
+                        files[collection_name] = file_list
+                    if url_list:
+                        urls[collection_name] = url_list
+                entry["stored_files"] = files
+                entry["stored_urls"] = urls
 
-                # finally, I can re-embed all the stored files in an asynchronous way
-                # limit concurrent embeddings to avoid overwhelming resources
-                semaphore = asyncio.Semaphore(5)  # Max 5 concurrent
-                await asyncio.gather(*[embed_with_limit(entry) for entry in stored_files_by_ccat])
+            # ── Phase 1: delete all collections from ALL agents ────────────
+            for entry in stored_files_by_ccat:
+                await entry["ccat"].vector_memory_handler.delete_all_collections()
 
+            # ── Phase 3: create all collections for ALL agents ─────────────
+            for entry in stored_files_by_ccat:
+                await entry["ccat"].vector_memory_handler.create_all_collections(
+                    embedder_name, embedder_size,
+                )
+
+            # ── Phase 4: re-ingest stored files ────────────────────────────
+            # ── Phase 5: re-ingest URLs (re-downloaded, metadata refreshed) ─
+            # ── Phase 6: re-embed procedures / tools ────────────────────────
+            semaphore = asyncio.Semaphore(5)  # limit concurrent embeddings
+
+            async def re_embed(entry_):
+                async with semaphore:
+                    tasks = []
+
+                    # Phase 4 — files
+                    for collection_name, sources in entry_["stored_files"].items():
+                        if sources:
+                            tasks.append(
+                                entry_["ccat"].embed_stored_sources(collection_name, sources)
+                            )
+
+                    # Phase 5 — URLs
+                    for collection_name, sources in entry_["stored_urls"].items():
+                        if sources:
+                            tasks.append(
+                                entry_["ccat"].embed_stored_sources(collection_name, sources)
+                            )
+
+                    # Phase 6 — procedures / tools
+                    tasks.append(entry_["ccat"].embed_procedures())
+
+                    await asyncio.gather(*tasks)
+
+            await asyncio.gather(*[re_embed(entry) for entry in stored_files_by_ccat])
             success = True
         except Exception as e:
             log.error(f"Error embedding all stored files: {e}")
