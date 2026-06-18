@@ -930,11 +930,18 @@ class QdrantHandler(BaseVectorDatabaseHandler):
     async def delete_tenant_points(self, collection_name: str, metadata: Dict | None = None) -> UpdateResult:
         conditions = self._build_metadata_conditions(metadata=metadata)
 
-        res = await self._client.delete(collection_name=collection_name, points_selector=Filter(must=conditions))  # type: ignore[attr-defined]
-        return UpdateResult(
-            status=res.status,
-            operation_id=res.operation_id,
-        )
+        try:
+            res = await self._client.delete(collection_name=collection_name, points_selector=Filter(must=conditions))  # type: ignore[attr-defined]
+            return UpdateResult(
+                status=res.status,
+                operation_id=res.operation_id,
+            )
+        except Exception as e:
+            # collection may already be gone after Phase 1 → nothing to delete
+            if "NOT_FOUND" in str(e):
+                log.warning(f"Collection `{collection_name}` not found during delete_tenant_points — nothing to delete")
+                return UpdateResult(status=True, operation_id=None)
+            raise
 
     # delete point in collection
     async def delete_tenant_points_by_ids(self, collection_name: str, points_ids: List) -> UpdateResult:
