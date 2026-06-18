@@ -1,5 +1,6 @@
 from typing import Dict, List
 from pydantic import BaseModel
+from fastapi import Query
 
 from cat import AuthorizedInfo, AuthPermission, AuthResource, check_permissions, endpoint
 from cat.exceptions import CustomNotFoundException
@@ -52,7 +53,7 @@ async def destroy_all_collection_points(
     return WipeCollectionsResponse(deleted=to_return)
 
 
-# DELETE one collection
+# DELETE (or recreate) one collection
 @endpoint.delete(
     "/collections/{collection_id}",
     response_model=WipeCollectionsResponse,
@@ -61,16 +62,36 @@ async def destroy_all_collection_points(
 )
 async def destroy_all_single_collection_points(
     collection_id: str,
+    recreate: bool = Query(
+        default=False,
+        description="If true, drop the collection and recreate it with the current embedder dimensions."
+    ),
     info: AuthorizedInfo = check_permissions(AuthResource.MEMORY, AuthPermission.DELETE),
 ) -> WipeCollectionsResponse:
-    """Delete and recreate a collection"""
-    existing_collections = await info.cheshire_cat.vector_memory_handler.get_collection_names()
+    """Delete tenant points from a collection, or drop and recreate it.
 
-    # check if the collection exists
+    By default, only the current agent's points are removed (collection stays).
+    Pass `?recreate=true` to drop the entire collection and recreate it with
+    the current embedder's name and size — useful when the embedding model changed.
+    """
+    vh = info.cheshire_cat.vector_memory_handler
+
+    if recreate:
+        # drop the entire collection and recreate with current embedder
+        try:
+            await vh.delete_collection(collection_id)
+        except Exception:
+            pass  # may not exist yet
+        embedder = await info.cheshire_cat.lizard.embedder()
+        await vh.create_collection(embedder.name, embedder.size, collection_id)
+        return WipeCollectionsResponse(deleted={collection_id: True})
+
+    # default: only remove this agent's points
+    existing_collections = await vh.get_collection_names()
     if collection_id not in existing_collections:
         raise CustomNotFoundException("Collection does not exist.")
 
-    ret = await info.cheshire_cat.vector_memory_handler.delete_tenant_points(collection_id)
+    ret = await vh.delete_tenant_points(collection_id)
     return WipeCollectionsResponse(deleted={collection_id: bool(ret)})
 
 
