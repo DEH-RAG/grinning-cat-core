@@ -116,7 +116,11 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         await crud_users.destroy_all(self._id)
 
     async def get_stored_sources_with_metadata(self) -> Dict[VectorMemoryType, List[StoredSourceWithMetadata]]:
-        """Get all stored files with their metadata."""
+        """Get all stored sources with their metadata, without loading file contents into memory.
+
+        File contents are read lazily from the file manager during re-ingestion
+        (one file at a time) to minimise peak memory usage.
+        """
         results = {
             VectorMemoryType.DECLARATIVE: set(),
             VectorMemoryType.EPISODIC: set(),
@@ -139,13 +143,9 @@ class CheshireCat(BotMixin, NonCopyableMixin):
                 if chat_id := metadata.get("chat_id"):
                     file_path = os.path.join(file_path, chat_id)
 
-                file_content = self.file_manager.read_file(filename, file_path)
-                if not file_content:
-                    continue
-
                 results[collection_name].add(
                     StoredSourceWithMetadata(
-                        name=filename, content=BytesIO(file_content), metadata=metadata, path=file_path,
+                        name=filename, content=None, metadata=metadata, path=file_path,
                     )
                 )
 
@@ -229,9 +229,25 @@ class CheshireCat(BotMixin, NonCopyableMixin):
 
                 cat = stray_cat
 
+            # figure out what to pass to the rabbit hole
+            if source.content is not None:
+                # caller already provided the bytes (backward compat)
+                file_input = source.content
+            elif is_url(source.name):
+                # URL: pass the URL string → _file_to_docs will re-download it
+                file_input = source.name
+            else:
+                # file stored in the (possibly remote) file manager: read it lazily
+                file_bytes = self.file_manager.read_file(source.name, source.path)
+                if not file_bytes:
+                    log.warning(f"File {source.name} not found in file manager at {source.path}. Skipping.")
+                    continue
+                file_input = BytesIO(file_bytes)
+                content_type, _ = guess_file_type(file_input)
+
             await rabbit_hole.ingest_file(
                 cat=cat,
-                file=source.content or source.name,
+                file=file_input,
                 filename=source.name,
                 metadata=source.metadata or {},
                 store_file=False,
