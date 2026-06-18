@@ -381,6 +381,35 @@ class BaseVectorDatabaseHandler(ABC):
         """
         pass
 
+    async def delete_all_collections(self):
+        """
+        Delete ALL collections managed by this handler for the current agent.
+
+        Iterates through all known collection names and deletes each one.
+        """
+        for name in self._collection_names:
+            if await self.check_collection_existence(name):
+                if self.save_memory_snapshots:
+                    await self.save_dump(name)
+                await self.delete_collection(name)
+
+    async def create_all_collections(self, embedder_name: str, embedder_size: int):
+        """
+        Create ALL collections managed by this handler with the given embedder configuration.
+
+        Collections are shared across agents, so each is created only once.
+        Override in subclasses to add dimension-validity checks (e.g. QdrantHandler
+        checks the actual vector size of existing collections and recreates if wrong).
+
+        Args:
+            embedder_name: Name of the embedder to use.
+            embedder_size: Size of the embedding vectors.
+        """
+        for name in self._collection_names:
+            if await self.check_collection_existence(name):
+                continue
+            await self.create_collection(embedder_name, embedder_size, name)
+
     @abstractmethod
     async def create_hybrid_collection(
         self, collection_name: str, dense_vector_config_name: str, sparse_vector_config_name: str
@@ -597,6 +626,25 @@ class QdrantHandler(BaseVectorDatabaseHandler):
             if is_collection_existing:
                 await self.delete_collection(collection_name=collection_name)
             await self.create_collection(embedder_name, embedder_size, collection_name)
+
+    async def create_all_collections(self, embedder_name: str, embedder_size: int):
+        """
+        Create ALL managed collections.  If a collection already exists the actual
+        vector size stored in Qdrant is compared against *embedder_size*, and the
+        collection is deleted + re-created when they differ.
+
+        Because collections are shared across agents, an existing collection with
+        matching dimensions is left untouched.
+        """
+        for name in self._collection_names:
+            exists = await self.check_collection_existence(name)
+            if exists and await self._check_embedding_size(embedder_name, embedder_size, name):
+                continue  # same size + same embedder alias → nothing to do
+            if exists:
+                if self.save_memory_snapshots:
+                    await self.save_dump(name)
+                await self.delete_collection(name)
+            await self.create_collection(embedder_name, embedder_size, name)
 
     def tenant_field_condition(self) -> FieldCondition:
         return FieldCondition(key="tenant_id", match=MatchValue(value=self.agent_id))
