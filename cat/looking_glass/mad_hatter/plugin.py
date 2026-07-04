@@ -204,7 +204,7 @@ class Plugin:
 
         # is "load_settings" hook defined in the plugin?
         if "load_settings" in self.overrides:
-            return self.overrides["load_settings"].function(self._id, agent_id)
+            return await self.overrides["load_settings"].function(self._id, agent_id)
 
         # by default, plugin settings are saved inside the Redis database
         settings = await crud_plugins.get_setting(agent_id, self._id) or self._get_settings_from_model()  # type: ignore[arg]
@@ -225,7 +225,7 @@ class Plugin:
     async def save_settings(self, settings: Dict, agent_id: str) -> Dict[str, Any]:
         # is "settings_save" hook defined in the plugin?
         if "save_settings" in self.overrides:
-            return self.overrides["save_settings"].function(self._id, settings, agent_id)
+            return await self.overrides["save_settings"].function(self._id, settings, agent_id)
 
         try:
             # overwrite settings over old ones
