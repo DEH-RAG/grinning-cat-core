@@ -126,6 +126,23 @@ class BaseVectorDatabaseHandler(ABC):
         """
         pass
 
+    async def check_embedding_compatibility(self, embedder_name: str, embedder_size: int) -> None:
+        """
+        Verify that the current embedder is compatible with existing collections.
+
+        Subclasses should override this to perform backend-specific checks
+        (e.g. vector dimension comparison, index validation).  The default
+        implementation is a no-op (assumes compatibility).
+
+        Args:
+            embedder_name: str, the name of the embedder.
+            embedder_size: int, the vector dimension produced by the embedder.
+
+        Raises:
+            RuntimeError: If the embedder is incompatible with any collection.
+        """
+        pass
+
     @abstractmethod
     def is_db_remote(self) -> bool:
         """
@@ -597,6 +614,20 @@ class QdrantHandler(BaseVectorDatabaseHandler):
             if is_collection_existing:
                 await self.delete_collection(collection_name=collection_name)
             await self.create_collection(embedder_name, embedder_size, collection_name)
+
+    async def check_embedding_compatibility(self, embedder_name: str, embedder_size: int) -> None:
+        """Qdrant-specific: verify every collection has matching embedder dimensions."""
+        for collection_name in self._collection_names:
+            is_existing = await self.check_collection_existence(collection_name)
+            if is_existing and not await self._check_embedding_size(
+                embedder_name, embedder_size, collection_name,
+            ):
+                raise RuntimeError(
+                    f"The current embedder ('{embedder_name}', size={embedder_size}) "
+                    f"is incompatible with collection '{collection_name}'. "
+                    f"Run the full re-ingestion for ALL agents via "
+                    f"PUT /embedder/settings first."
+                )
 
     def tenant_field_condition(self) -> FieldCondition:
         return FieldCondition(key="tenant_id", match=MatchValue(value=self.agent_id))

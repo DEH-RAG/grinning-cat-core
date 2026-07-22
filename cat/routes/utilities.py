@@ -1,7 +1,7 @@
 import os
 import shutil
 from typing import List, Dict
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel, Field
 
 from cat.auth.connection import AuthorizedInfo
@@ -43,6 +43,11 @@ class AgentUpdatedResponse(BaseModel):
 
 class AgentClonedResponse(BaseModel):
     cloned: bool = False
+
+
+class AgentReingestResponse(BaseModel):
+    reingested: bool = False
+    agent_id: str = ""
 
 
 class ResetResponse(BaseModel):
@@ -228,3 +233,21 @@ async def agent_clone(
 
         await info.lizard.rollback_cheshire_cat_creation(agent_id, cloned_ccat)
         return AgentClonedResponse(cloned=False)
+
+
+@router.post("/agents/reingest", response_model=AgentReingestResponse)
+async def agent_reingest(
+    background_tasks: BackgroundTasks,
+    info: AuthorizedInfo = check_permissions(AuthResource.CHESHIRE_CAT, AuthPermission.WRITE),
+) -> AgentReingestResponse:
+    """
+    Re-ingest all stored files, URLs and procedures for the current agent.
+
+    This clears the agent's vector points from DECLARATIVE, EPISODIC and
+    PROCEDURAL collections and re-embeds them using the current embedder.
+    Unlike the full embedder-change flow, this does **not** delete and
+    recreate the global collections — it only operates on the requesting
+    agent's tenant points.
+    """
+    await info.lizard.embed_in_cheshire_cat(info.cheshire_cat.agent_key)  # type: ignore[union-attr]
+    return AgentReingestResponse(reingested=True, agent_id=info.cheshire_cat.agent_key)  # type: ignore[union-attr]

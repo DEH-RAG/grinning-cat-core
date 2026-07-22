@@ -247,13 +247,16 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
                 success = True
                 return
 
-            # --- Phase 2: Delete old collections & create new ones (once, globally) ---
-            # Collections are global (not per-agent): "episodic", "declarative",
-            # "procedural" are shared across all agents with tenant_id payload
-            # filtering.  Re-initializing the first agent's handler is sufficient.
-            await stored_files_by_ccat[0]["ccat"].vector_memory_handler.initialize(
-                embedder_name, embedder_size,
-            )
+            # --- Phase 2: Initialize ALL vector databases ---
+            # Each agent may use a different vector DB backend (Qdrant,
+            # Neo4j, Weaviate, etc.).  initialize() must be called on every
+            # handler.  For backends with global collections (Qdrant) the
+            # subsequent calls are no-ops; for tenant-scoped backends
+            # (GraphRAG/Neo4j) each call initializes independently.
+            for entry in stored_files_by_ccat:
+                await entry["ccat"].vector_memory_handler.initialize(
+                    embedder_name, embedder_size,
+                )
 
             # --- Phase 3: Re-embed all stored files from ALL agents in parallel ---
             semaphore = asyncio.Semaphore(5)  # limit concurrent embeddings
@@ -280,6 +283,46 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
         await self.plugin_manager.execute_hook(
             "after_all_cheshire_cats_embedded", success, caller=self,
         )
+
+    async def embed_in_cheshire_cat(self, agent_id: str) -> None:
+        """Re-embed all stored files and procedures for a single Cheshire Cat.
+
+        Unlike ``embed_all_in_cheshire_cats``, this method does **not** delete
+        and recreate the global vector collections — it only clears and
+        re-populates the requesting agent's tenant points.  This means it is
+        safe to call for one agent at a time, but it also assumes the embedder
+        has **not** changed (i.e. the collection vector dimensions are
+        compatible with the current embedder).
+        """
+        ccat = await self.get_cheshire_cat(agent_id)
+        if ccat is None:
+            raise ValueError(f"Agent '{agent_id}' not found")
+
+        embedder = await self.embedder()
+        embedder_name = embedder.name
+        embedder_size = embedder.size
+
+        # Verify embedder compatibility before touching any data
+        # (delegates to the backend-specific implementation)
+        await ccat.vector_memory_handler.check_embedding_compatibility(
+            embedder_name, embedder_size,
+        )
+
+        # Collect stored sources while the old points still exist
+        stored_sources = await ccat.get_stored_sources_with_metadata()
+
+        # Re-embed declarative & episodic files (per-tenant deletion is built-in)
+        tasks = [
+            ccat.embed_stored_sources(collection_name, sources)
+            for collection_name, sources in stored_sources.items()
+            if sources
+        ]
+        # Re-embed procedural
+        tasks.append(ccat.embed_procedures())
+
+        await asyncio.gather(*tasks)
+
+        log.info(f"Agent id: {agent_id}. Re-ingestion complete")
 
     def is_custom_endpoint(self, path: str, methods: List[str] | None = None):
         """
