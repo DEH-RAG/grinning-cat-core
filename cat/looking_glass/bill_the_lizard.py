@@ -223,26 +223,17 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
 
     async def embed_all_in_cheshire_cats(self) -> None:
         """Re-embeds all the stored files and procedures in all the Cheshire Cats using the current embedder."""
-        async def embed_with_limit(entry_):
-            async with semaphore:
-                # re-embed all the stored files
-                tasks = [
-                    entry_["ccat"].embed_stored_sources(collection_name, sources)
-                    for collection_name, sources in entry_["stored_sources"].items()
-                    if sources
-                ] + [entry_["ccat"].embed_procedures()]
-                await asyncio.gather(*tasks)
-
         success = False
         try:
             embedder = await self.embedder()
             embedder_name = embedder.name
             embedder_size = embedder.size
 
+            # --- Phase 1: Collect all stored sources from all agents ---
+            # The collections still have the OLD embedder at this point, so
+            # stored source retrieval works correctly.
             ccat_ids = await crud_settings.get_agents_main_keys()
             stored_files_by_ccat: List[Dict] = []
-            # first, I need to get all the stored files from all the Cheshire Cats with the metadata stored
-            # within the vector memory; I do not remove anything from the latter to avoid any race condition
             for ccat_id in ccat_ids:
                 if (ccat := await self.get_cheshire_cat(ccat_id)) is None:
                     continue
@@ -252,15 +243,35 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
                     "stored_sources": await ccat.get_stored_sources_with_metadata(),
                 })
 
-            # now, I have to re-initialize all the vector databases in a serialized way, outside threads to avoid
-            # race conditions
-            for entry in stored_files_by_ccat:
-                await entry["ccat"].vector_memory_handler.initialize(embedder_name, embedder_size)
+            if not stored_files_by_ccat:
+                success = True
+                return
 
-                # finally, I can re-embed all the stored files in an asynchronous way
-                # limit concurrent embeddings to avoid overwhelming resources
-                semaphore = asyncio.Semaphore(5)  # Max 5 concurrent
-                await asyncio.gather(*[embed_with_limit(entry) for entry in stored_files_by_ccat])
+            # --- Phase 2: Delete old collections & create new ones (once, globally) ---
+            # Collections are global (not per-agent): "episodic", "declarative",
+            # "procedural" are shared across all agents with tenant_id payload
+            # filtering.  Re-initializing the first agent's handler is sufficient.
+            await stored_files_by_ccat[0]["ccat"].vector_memory_handler.initialize(
+                embedder_name, embedder_size,
+            )
+
+            # --- Phase 3: Re-embed all stored files from ALL agents in parallel ---
+            semaphore = asyncio.Semaphore(5)  # limit concurrent embeddings
+            reembed_tasks = []
+            for entry in stored_files_by_ccat:
+                # Use default argument to avoid closure capture of loop variable
+                async def _reembed(entry_, sem=semaphore):
+                    async with sem:
+                        tasks = [
+                            entry_["ccat"].embed_stored_sources(collection_name, sources)
+                            for collection_name, sources in entry_["stored_sources"].items()
+                            if sources
+                        ] + [entry_["ccat"].embed_procedures()]
+                        await asyncio.gather(*tasks)
+
+                reembed_tasks.append(_reembed(entry))
+
+            await asyncio.gather(*reembed_tasks)
 
             success = True
         except Exception as e:
