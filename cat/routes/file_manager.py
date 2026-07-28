@@ -148,6 +148,8 @@ async def delete_file(
     info: AuthorizedInfo = check_permissions(AuthResource.MEMORY, AuthPermission.DELETE),
 ) -> FileManagerDeletedFiles:
     """Delete a file"""
+    await block_during_reingestion(info.cheshire_cat.agent_key)  # type: ignore[union-attr]
+
     path, collection_id, metadata = get_from_info(info)
     metadata = {"source": source_name} | metadata
 
@@ -170,6 +172,8 @@ async def delete_files(
     info: AuthorizedInfo = check_permissions(AuthResource.MEMORY, AuthPermission.DELETE),
 ) -> FileManagerDeletedFiles:
     """Delete all files"""
+    await block_during_reingestion(info.cheshire_cat.agent_key)  # type: ignore[union-attr]
+
     path, collection_id, metadata = get_from_info(info)
 
     try:

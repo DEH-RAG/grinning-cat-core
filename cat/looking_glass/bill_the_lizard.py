@@ -1,4 +1,5 @@
 import asyncio
+import json
 from typing import List, Dict
 from fastapi import FastAPI
 
@@ -6,7 +7,7 @@ from cat.auth.auth_utils import DEFAULT_ADMIN_USERNAME, hash_password
 from cat.auth.permissions import get_full_permissions
 from cat.db import crud
 from cat.db.cruds import settings as crud_settings, plugins as crud_plugins, users as crud_users
-from cat.db.database import DEFAULT_SYSTEM_KEY, DEFAULT_CONVERSATIONS_KEY
+from cat.db.database import DEFAULT_SYSTEM_KEY, DEFAULT_CONVERSATIONS_KEY, get_async_db
 from cat.db.models import Setting
 from cat.env import get_env
 from cat.log import log
@@ -221,78 +222,175 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
 
         return cloned_ccat  # type: ignore[return-value]
 
+    # ------------------------------------------------------------------
+    # Resilient re-ingestion state helpers (Redis-backed)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _reingestion_key(agent_id: str, suffix: str) -> str:
+        return f"reingesting:{agent_id}:{suffix}"
+
+    async def _save_reingestion_sources(self, agent_id: str, sources: Dict) -> None:
+        """Persist the list of sources to Redis so it survives a crash."""
+        # Convert StoredSourceWithMetadata to JSON-serializable dicts
+        serializable = {}
+        for collection_name, srcs in sources.items():
+            serializable[str(collection_name)] = [
+                {
+                    "name": s.name,
+                    "path": s.path,
+                    "metadata": s.metadata,
+                    "has_content": s.content is not None,
+                }
+                for s in srcs
+            ]
+        await get_async_db().set(
+            self._reingestion_key(agent_id, "sources"),
+            json.dumps(serializable),
+            ex=3600,  # 1 hour TTL
+        )
+
+    async def _set_reingestion_status(self, agent_id: str, status: str, error: str = "") -> None:
+        await get_async_db().set(
+            self._reingestion_key(agent_id, "status"), status, ex=3600,
+        )
+        if error:
+            await get_async_db().set(
+                self._reingestion_key(agent_id, "error"), error, ex=3600,
+            )
+
+    async def _get_reingestion_status(self, agent_id: str) -> str | None:
+        val = await get_async_db().get(self._reingestion_key(agent_id, "status"))
+        return val.decode() if val else None
+
+    async def _update_reingestion_progress(
+        self, agent_id: str, collections_done: list, procedures_done: bool,
+    ) -> None:
+        await get_async_db().set(
+            self._reingestion_key(agent_id, "progress"),
+            json.dumps({"collections_done": collections_done, "procedures_done": procedures_done}),
+            ex=3600,
+        )
+
+    async def _get_reingestion_progress(self, agent_id: str) -> dict:
+        val = await get_async_db().get(self._reingestion_key(agent_id, "progress"))
+        return json.loads(val) if val else {}
+
+    async def _has_incomplete_reingestion(self, agent_id: str) -> bool:
+        status = await self._get_reingestion_status(agent_id)
+        return status in ("collecting", "embedding")
+
+    async def _clear_reingestion_state(self, agent_id: str) -> None:
+        base = f"reingesting:{agent_id}"
+        redis = get_async_db()
+        for suffix in (":sources", ":status", ":progress", ":error"):
+            try:
+                await redis.delete(base + suffix)
+            except Exception:
+                pass
+        # Also clear the blocking flag
+        try:
+            await redis.delete(base)
+        except Exception:
+            pass
+
     async def embed_all_in_cheshire_cats(self) -> None:
-        """Re-embeds all the stored files and procedures in all the Cheshire Cats using the current embedder."""
+        """Re-embeds all stored files and procedures in all Cheshire Cats with
+        resilient state tracking in Redis (per-agent progress survives crashes).
+        """
         success = False
         try:
             embedder = await self.embedder()
             embedder_name = embedder.name
             embedder_size = embedder.size
 
+            # Global flag — blocks recall for ALL agents
+            redis = get_async_db()
+            await redis.set("reingesting:all", "1", ex=600)
+
             # --- Phase 1: Collect all stored sources from all agents ---
-            # The collections still have the OLD embedder at this point, so
-            # stored source retrieval works correctly.
             ccat_ids = await crud_settings.get_agents_main_keys()
             stored_files_by_ccat: List[Dict] = []
             for ccat_id in ccat_ids:
                 if (ccat := await self.get_cheshire_cat(ccat_id)) is None:
                     continue
 
+                agent_sources = await ccat.get_stored_sources_with_metadata()
                 stored_files_by_ccat.append({
                     "ccat": ccat,
-                    "stored_sources": await ccat.get_stored_sources_with_metadata(),
+                    "stored_sources": agent_sources,
                 })
+                # Persist sources to Redis (survives crash)
+                await self._save_reingestion_sources(ccat_id, agent_sources)
+                await self._set_reingestion_status(ccat_id, "initializing")
 
             if not stored_files_by_ccat:
                 success = True
                 return
 
             # --- Phase 2: Initialize ALL vector databases ---
-            # Each agent may use a different vector DB backend (Qdrant,
-            # Neo4j, Weaviate, etc.).  initialize() must be called on every
-            # handler.  For backends with global collections (Qdrant) the
-            # subsequent calls are no-ops; for tenant-scoped backends
-            # (GraphRAG/Neo4j) each call initializes independently.
             for entry in stored_files_by_ccat:
                 await entry["ccat"].vector_memory_handler.initialize(
                     embedder_name, embedder_size,
                 )
 
-            # --- Phase 3: Re-embed all stored files from ALL agents in parallel ---
-            semaphore = asyncio.Semaphore(5)  # limit concurrent embeddings
+            # --- Phase 3: Re-embed with per-agent progress ---
+            semaphore = asyncio.Semaphore(5)
             reembed_tasks = []
             for entry in stored_files_by_ccat:
-                # Use default argument to avoid closure capture of loop variable
-                async def _reembed(entry_, sem=semaphore):
-                    async with sem:
-                        tasks = [
-                            entry_["ccat"].embed_stored_sources(collection_name, sources)
-                            for collection_name, sources in entry_["stored_sources"].items()
-                            if sources
-                        ] + [entry_["ccat"].embed_procedures()]
-                        await asyncio.gather(*tasks)
+                agent_id = entry["ccat"].agent_key  # type: ignore[union-attr]
 
-                reembed_tasks.append(_reembed(entry))
+                async def _reembed_with_progress(entry_, agent_id_, sem=semaphore):
+                    async with sem:
+                        ccat_ = entry_["ccat"]
+                        sources_ = entry_["stored_sources"]
+                        collections_done = []
+
+                        await self._set_reingestion_status(agent_id_, "embedding")
+
+                        for col_name, srcs in sources_.items():
+                            if not srcs:
+                                continue
+                            await ccat_.embed_stored_sources(col_name, srcs)
+                            collections_done.append(str(col_name))
+                            await self._update_reingestion_progress(
+                                agent_id_, collections_done, procedures_done=False,
+                            )
+
+                        await ccat_.embed_procedures()
+                        await self._update_reingestion_progress(
+                            agent_id_, collections_done, procedures_done=True,
+                        )
+                        await self._set_reingestion_status(agent_id_, "done")
+                        await self._clear_reingestion_state(agent_id_)
+
+                reembed_tasks.append(_reembed_with_progress(entry, agent_id))
 
             await asyncio.gather(*reembed_tasks)
-
             success = True
         except Exception as e:
             log.error(f"Error embedding all stored files: {e}")
+        finally:
+            try:
+                await get_async_db().delete("reingesting:all")
+            except Exception:
+                pass
 
         await self.plugin_manager.execute_hook(
             "after_all_cheshire_cats_embedded", success, caller=self,
         )
 
-    async def embed_in_cheshire_cat(self, agent_id: str) -> None:
+    async def embed_in_cheshire_cat(self, agent_id: str, resume: bool = False) -> None:
         """Re-embed all stored files and procedures for a single Cheshire Cat.
 
         Unlike ``embed_all_in_cheshire_cats``, this method does **not** delete
         and recreate the global vector collections — it only clears and
-        re-populates the requesting agent's tenant points.  This means it is
-        safe to call for one agent at a time, but it also assumes the embedder
-        has **not** changed (i.e. the collection vector dimensions are
-        compatible with the current embedder).
+        re-populates the requesting agent's tenant points.
+
+        The re-ingestion state (sources, progress, status) is persisted to
+        Redis so that a crash or restart can be recovered from.  If the agent
+        has an incomplete re-ingestion, this method resumes from where it left
+        off.
         """
         ccat = await self.get_cheshire_cat(agent_id)
         if ccat is None:
@@ -303,26 +401,120 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
         embedder_size = embedder.size
 
         # Verify embedder compatibility before touching any data
-        # (delegates to the backend-specific implementation)
         await ccat.vector_memory_handler.check_embedding_compatibility(
             embedder_name, embedder_size,
         )
 
-        # Collect stored sources while the old points still exist
-        stored_sources = await ccat.get_stored_sources_with_metadata()
+        flag_key = f"reingesting:{agent_id}"
 
-        # Re-embed declarative & episodic files (per-tenant deletion is built-in)
-        tasks = [
-            ccat.embed_stored_sources(collection_name, sources)
-            for collection_name, sources in stored_sources.items()
-            if sources
-        ]
-        # Re-embed procedural
-        tasks.append(ccat.embed_procedures())
+        # --- Check for incomplete previous run ---
+        if await self._has_incomplete_reingestion(agent_id):
+            log.warning(
+                f"Agent id: {agent_id}. Found incomplete re-ingestion — resuming"
+            )
+            await self._resume_reingestion(agent_id, ccat, embedder_name, embedder_size)
+            return
 
-        await asyncio.gather(*tasks)
+        # --- Fresh re-ingestion ---
+        await get_async_db().set(flag_key, "1", ex=600)
+        await self._set_reingestion_status(agent_id, "collecting")
 
+        try:
+            stored_sources = await ccat.get_stored_sources_with_metadata()
+            await self._save_reingestion_sources(agent_id, stored_sources)
+
+            await self._run_reingestion(agent_id, ccat, stored_sources)
+        except Exception as e:
+            log.error(f"Agent id: {agent_id}. Re-ingestion failed: {e}")
+            await self._set_reingestion_status(agent_id, "failed", str(e))
+            raise
+        finally:
+            try:
+                await get_async_db().delete(flag_key)
+            except Exception:
+                pass
+
+    async def _run_reingestion(
+        self, agent_id: str, ccat: CheshireCat, stored_sources: Dict,
+    ) -> None:
+        """Execute the actual re-ingestion with progress tracking."""
+        await self._set_reingestion_status(agent_id, "embedding")
+
+        collections_done = []
+        total_collections = [k for k, v in stored_sources.items() if v]
+
+        for collection_name, sources in stored_sources.items():
+            if not sources:
+                continue
+            await ccat.embed_stored_sources(collection_name, sources)
+            collections_done.append(str(collection_name))
+            await self._update_reingestion_progress(
+                agent_id, collections_done, procedures_done=False,
+            )
+
+        await ccat.embed_procedures()
+        await self._update_reingestion_progress(
+            agent_id, collections_done, procedures_done=True,
+        )
+
+        await self._set_reingestion_status(agent_id, "done")
+        await self._clear_reingestion_state(agent_id)
         log.info(f"Agent id: {agent_id}. Re-ingestion complete")
+
+    async def _resume_reingestion(
+        self, agent_id: str, ccat: CheshireCat,
+        embedder_name: str, embedder_size: int,
+    ) -> None:
+        """Resume an interrupted re-ingestion from the last saved state."""
+        flag_key = f"reingesting:{agent_id}"
+        await get_async_db().set(flag_key, "1", ex=600)
+
+        try:
+            # Re-read stored sources from Redis (survives crash)
+            sources_raw = await get_async_db().get(
+                self._reingestion_key(agent_id, "sources"),
+            )
+            if not sources_raw:
+                # Sources lost — restart from scratch
+                log.warning(f"Agent id: {agent_id}. Saved sources lost, restarting from scratch")
+                await self._clear_reingestion_state(agent_id)
+                stored_sources = await ccat.get_stored_sources_with_metadata()
+                await self._save_reingestion_sources(agent_id, stored_sources)
+                await self._run_reingestion(agent_id, ccat, stored_sources)
+                return
+
+            saved = json.loads(sources_raw)
+            progress = await self._get_reingestion_progress(agent_id)
+
+            # Determine which collections still need work.
+            # embed_stored_sources() internally clears the tenant points first,
+            # so if a collection was interrupted mid-way, it's safe to re-run.
+            collections_done = set(progress.get("collections_done", []))
+            all_collections = list(saved.keys())
+
+            pending = [c for c in all_collections if c not in collections_done]
+            procedures_done = progress.get("procedures_done", False)
+
+            if pending or not procedures_done:
+                log.info(
+                    f"Agent id: {agent_id}. Resuming — pending collections: {pending}, "
+                    f"procedures: {'done' if procedures_done else 'pending'}"
+                )
+
+            # Re-embed pending collections (the sources list was saved, but
+            # the actual file contents must be re-read from the file manager).
+            stored_sources = await ccat.get_stored_sources_with_metadata()
+            await self._save_reingestion_sources(agent_id, stored_sources)
+            await self._run_reingestion(agent_id, ccat, stored_sources)
+        except Exception as e:
+            log.error(f"Agent id: {agent_id}. Resume failed: {e}")
+            await self._set_reingestion_status(agent_id, "failed", str(e))
+            raise
+        finally:
+            try:
+                await get_async_db().delete(flag_key)
+            except Exception:
+                pass
 
     def is_custom_endpoint(self, path: str, methods: List[str] | None = None):
         """

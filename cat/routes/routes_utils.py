@@ -325,3 +325,26 @@ def sanitize_source_name(source_name: str, path: str) -> str:
 
 def run_background_task(background_tasks: BackgroundTasks, func, *args, **kwargs):
     background_tasks.add_task(func, *args, **kwargs)
+
+
+async def block_during_reingestion(agent_key: str) -> None:
+    """Raise an HTTP 423 Locked error if a re-ingestion is in progress.
+
+    Call before any file upload / URL upload / file delete to prevent
+    race conditions with the re-ingestion process.
+    """
+    from fastapi import HTTPException
+    from cat.db.database import get_async_db
+
+    try:
+        db = get_async_db()
+        if await db.get("reingesting:all") or await db.get(f"reingesting:{agent_key}"):
+            raise HTTPException(
+                status_code=423,
+                detail="This agent's knowledge is being re-indexed. "
+                       "Please wait and try again shortly.",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # Redis unavailable → allow the operation

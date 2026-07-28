@@ -6,6 +6,7 @@ from websockets.exceptions import ConnectionClosedOK
 
 from cat import utils
 from cat.auth.permissions import AuthUserInfo
+from cat.db.database import get_async_db
 from cat.log import log
 from cat.looking_glass.mad_hatter.mad_hatter import MadHatter
 from cat.looking_glass.mad_hatter.procedures import CatProcedure
@@ -121,6 +122,25 @@ class StrayCat(BotMixin, NonCopyableMixin):
 
         self.working_memory.context_memories = list(set(agent_memories) | set(chat_memories))
 
+    @staticmethod
+    async def _is_reingesting_for(agent_key: str) -> bool:
+        """Check whether a re-ingestion is in progress for *agent_key*.
+
+        Returns ``True`` when either:
+
+        * a **global** re-ingestion (``embed_all_in_cheshire_cats``) is
+          running (flag ``reingesting:all``), or
+        * a **single-agent** re-ingestion is in progress for the given
+          agent (flag ``reingesting:{agent_key}``).
+        """
+        try:
+            db = get_async_db()
+            if await db.get("reingesting:all"):
+                return True
+            return bool(await db.get(f"reingesting:{agent_key}"))
+        except Exception:
+            return False
+
     async def get_procedures(self, config: RecallSettings) -> List[StructuredTool]:
         """
         Retrieves a list of structured tools based on procedural memories by performing context retrieval,
@@ -185,6 +205,22 @@ class StrayCat(BotMixin, NonCopyableMixin):
         # obtain prompt parts from plugins
         prompt_prefix = await plugin_manager.execute_hook("agent_prompt_prefix", prompts.MAIN_PROMPT, caller=self)
         prompt_suffix = await plugin_manager.execute_hook("agent_prompt_suffix", "", caller=self)
+
+        # If a re-ingestion is in progress, let the LLM know so it can
+        # inform the user naturally in chat that document search is
+        # temporarily unavailable.
+        reingesting = await self._is_reingesting_for(self.agent_key)
+        if reingesting:
+            prompt_suffix += (
+                "\n\n## IMPORTANT SYSTEM NOTICE\n"
+                "The agent's knowledge base is currently being **re-indexed** "
+                "(this happens after a configuration change, e.g. switching the "
+                "embedding model).  Document search results are temporarily "
+                "unavailable.  If the user asks about uploaded files or URLs, "
+                "politely explain that the re-indexing is in progress and their "
+                "documents will be searchable again shortly.\n"
+            )
+
         system_prompt = prompt_prefix + prompt_suffix
 
         # hook to modify/enrich user input; this is the latest user message
@@ -193,25 +229,30 @@ class StrayCat(BotMixin, NonCopyableMixin):
             UserMessage
         )
 
+        # Skip the recall if a re-ingestion is in progress — the vector
+        # store is being rebuilt.  The LLM was already informed via the
+        # system prompt above.
         try:
-            embedder = await self.lizard.embedder()
-            config = RecallSettings(
-                embedding=embedder.embed_query(self.working_memory.user_message.text),  # type: ignore[arg-type]
-                metadata=self.working_memory.user_message.get("metadata", {})
-            )
+            if not reingesting:
+                embedder = await self.lizard.embedder()
+                config = RecallSettings(
+                    embedding=embedder.embed_query(self.working_memory.user_message.text),  # type: ignore[arg-type]
+                    metadata=self.working_memory.user_message.get("metadata", {})
+                )
 
-            # hook to do something before recall begins
-            config = await self.plugin_manager.execute_hook("before_cat_recalls_memories", config, caller=self)
+                # hook to do something before recall begins
+                config = await self.plugin_manager.execute_hook("before_cat_recalls_memories", config, caller=self)
 
-            # Start the PROCEDURAL fetch immediately — it queries a different Qdrant collection
-            # and is completely independent of the DECLARATIVE + EPISODIC recalls below.
-            # Both sets of queries will run concurrently on the event loop.
-            procedures_task = asyncio.ensure_future(self.get_procedures(config))
+                # Start the PROCEDURAL fetch immediately — it queries a different Qdrant collection
+                # and is completely independent of the DECLARATIVE + EPISODIC recalls below.
+                procedures_task = asyncio.ensure_future(self.get_procedures(config))
 
-            await self.recall_context_to_working_memory(config)
+                await self.recall_context_to_working_memory(config)
 
-            # hook to modify/enrich retrieved memories
-            await self.plugin_manager.execute_hook("after_cat_recalls_memories", config, caller=self)
+                # hook to modify/enrich retrieved memories
+                await self.plugin_manager.execute_hook("after_cat_recalls_memories", config, caller=self)
+            else:
+                procedures_task = asyncio.ensure_future(asyncio.sleep(0))  # dummy awaitable
 
             # if the agent is set to fast reply, skip everything and return the output
             agent_output = await plugin_manager.execute_hook("agent_fast_reply", caller=self)

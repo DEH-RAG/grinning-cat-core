@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 from typing import List, Dict
@@ -48,6 +49,13 @@ class AgentClonedResponse(BaseModel):
 class AgentReingestResponse(BaseModel):
     reingested: bool = False
     agent_id: str = ""
+
+
+class AgentReingestStatus(BaseModel):
+    agent_id: str = ""
+    status: str = ""          # collecting | embedding | done | failed | (empty = none)
+    error: str = ""
+    progress: dict = Field(default_factory=dict)  # {collections_done: [...], procedures_done: bool}
 
 
 class ResetResponse(BaseModel):
@@ -251,3 +259,37 @@ async def agent_reingest(
     """
     await info.lizard.embed_in_cheshire_cat(info.cheshire_cat.agent_key)  # type: ignore[union-attr]
     return AgentReingestResponse(reingested=True, agent_id=info.cheshire_cat.agent_key)  # type: ignore[union-attr]
+
+
+@router.get("/agents/reingest/status", response_model=AgentReingestStatus)
+async def agent_reingest_status(
+    info: AuthorizedInfo = check_permissions(AuthResource.CHESHIRE_CAT, AuthPermission.READ),
+) -> AgentReingestStatus:
+    """Get the re-ingestion status for the current agent."""
+    agent_id = info.cheshire_cat.agent_key  # type: ignore[union-attr]
+    db = get_async_db()
+
+    status = await db.get(f"reingesting:{agent_id}:status")
+    if not status:
+        return AgentReingestStatus(agent_id=agent_id, status="")
+
+    error = await db.get(f"reingesting:{agent_id}:error")
+    progress_raw = await db.get(f"reingesting:{agent_id}:progress")
+
+    return AgentReingestStatus(
+        agent_id=agent_id,
+        status=status.decode(),
+        error=error.decode() if error else "",
+        progress=json.loads(progress_raw) if progress_raw else {},
+    )
+
+
+@router.post("/agents/reingest/resume", response_model=AgentReingestResponse)
+async def agent_reingest_resume(
+    background_tasks: BackgroundTasks,
+    info: AuthorizedInfo = check_permissions(AuthResource.CHESHIRE_CAT, AuthPermission.WRITE),
+) -> AgentReingestResponse:
+    """Resume an interrupted re-ingestion for the current agent."""
+    agent_id = info.cheshire_cat.agent_key  # type: ignore[union-attr]
+    await info.lizard.embed_in_cheshire_cat(agent_id, resume=True)
+    return AgentReingestResponse(reingested=True, agent_id=agent_id)

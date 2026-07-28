@@ -11,7 +11,7 @@ from cat.auth.connection import AuthorizedInfo
 from cat.auth.permissions import AuthPermission, AuthResource, check_permissions
 from cat.exceptions import CustomValidationException
 from cat.log import log
-from cat.routes.routes_utils import run_background_task
+from cat.routes.routes_utils import block_during_reingestion, run_background_task
 from cat.services.memory.models import VectorMemoryType
 from cat.utils import guess_file_type, write_temp_file
 
@@ -51,6 +51,8 @@ async def _on_upload_single_file(
 ):
     lizard = info.lizard
     cat = info.stray_cat or info.cheshire_cat
+
+    await block_during_reingestion(cat.agent_key)  # type: ignore[union-attr]
 
     try:
         with open(path, "rb") as f:
@@ -170,6 +172,7 @@ async def upload_url(
 ) -> UploadUrlResponse:
     """Upload an url. Website content will be extracted and segmented into chunks.
     Chunks will be then vectorized and stored into documents memory."""
+    await block_during_reingestion(info.cheshire_cat.agent_key)  # type: ignore[union-attr]
     try:
         # Send a HEAD request to the specified URL
         async with httpx.AsyncClient() as client:
