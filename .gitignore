@@ -6,6 +6,7 @@ __pycache__
 
 # opencode
 .sisyphus/
+.opencode/
 AGENTS.md
 
 # python local dev
