@@ -40,6 +40,7 @@ RUN apt-get update && \
 # 4. Dipendenze Python: Copiamo solo i manifesti per sfruttare la cache
 COPY pyproject.toml uv.lock ./
 COPY ./cat/core_plugins ./cat/core_plugins
+COPY ./scripts/hash_plugin_requirements.py ./scripts/hash_plugin_requirements.py
 
 # Installiamo librerie Core e Plugin
 RUN uv venv .venv && \
@@ -47,13 +48,7 @@ RUN uv venv .venv && \
     (find ./cat/core_plugins -name requirements.txt; \
      find ./cat/plugins -name requirements.txt 2>/dev/null || true) \
     | sed 's/^/-r /' | xargs -r uv pip install && \
-    python3 -c "
-import hashlib, os, glob
-for req in glob.glob('cat/core_plugins/*/requirements.txt') + glob.glob('cat/plugins/*/requirements.txt'):
-    h = hashlib.sha256(open(req, 'rb').read()).hexdigest()
-    open(os.path.join(os.path.dirname(req), '.requirements_hash'), 'w').write(h)
-    print(f'  hashed {req} -> {h[:12]}...')
-"
+    python3 scripts/hash_plugin_requirements.py
 
 # 5. HARDENING: Purga aggressiva dei tool di sviluppo e compilazione
 # Rimuoviamo 'build-essential', le librerie dev e i compilatori di base (gcc, make)
