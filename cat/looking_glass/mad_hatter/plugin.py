@@ -1,5 +1,7 @@
 import asyncio
+import fcntl
 import glob
+import hashlib
 import importlib
 import json
 import os
@@ -279,57 +281,134 @@ class Plugin:
         json_file_data["name"] = json_file_data.get("name", to_camel_case(self._id))
         return PluginManifest(**json_file_data)
 
+    @staticmethod
+    def _hash_file(path: str) -> str:
+        """SHA256 hash of file contents."""
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(8192), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
     async def _install_requirements(self):
         req_file = os.path.join(self.path, "requirements.txt")
         if not os.path.exists(req_file):
             return
 
-        start_time = time.time()
-        log.info(f"Installing requirements for plugin {self.id}")
+        current_hash = self._hash_file(req_file)
+        hash_file = os.path.join(self.path, ".requirements_hash")
 
-        has_error = False
-        install_cmd = ["uv", "pip", "install", "--no-cache", "--no-upgrade", "-r", req_file]
+        # Fast path: requirements haven't changed since last install
+        if os.path.exists(hash_file):
+            with open(hash_file, "r") as hf:
+                if hf.read().strip() == current_hash:
+                    return
+
+        loop = asyncio.get_running_loop()
+        lock_file = os.path.join(self.path, ".install.lock")
+
+        # Try to become the installer via a non-blocking flock.
+        # Only ONE worker succeeds — the others poll for the hash to appear.
+        lf = open(lock_file, "w")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *install_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            while line := await proc.stdout.readline():  # type: ignore[union-attr]
-                log.debug(line.decode().strip())
-            await proc.wait()
-            if proc.returncode != 0:
-                raise subprocess.CalledProcessError(proc.returncode or 1, install_cmd)
+            fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lf.close()
+            # Another worker is installing → poll asynchronously
+            for _ in range(60):  # up to 6 seconds
+                await asyncio.sleep(0.1)
+                if os.path.exists(hash_file):
+                    with open(hash_file, "r") as hf:
+                        if hf.read().strip() == current_hash:
+                            return
+            # Poll timed out — fallback to blocking install
+            await loop.run_in_executor(None, self._install_requirements_sync, req_file, current_hash)
+            return
 
-            duration = time.time() - start_time
-            log.info(f"Installation of requirements for {self.id} completed in {duration:.2f}s")
-        except subprocess.CalledProcessError as e:
-            log.error(f"Error while installing plugin {self.id} requirements: {e}")
-
-            log.info(f"Uninstalling requirements for: {self.id}")
-            uninstall_cmd = ["uv", "pip", "uninstall", "-r", "requirements.txt"]
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *uninstall_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                )
-                while line := await proc.stdout.readline():  # type: ignore[union-attr]
-                    log.debug(line.decode().strip())
-                await proc.wait()
-                if proc.returncode != 0:
-                    raise subprocess.CalledProcessError(proc.returncode or 1, uninstall_cmd)
-            except Exception as e_:
-                log.error(f"Error while uninstalling plugin {self.id} requirements: {e_}")
-
-            has_error = True
+        # We hold the lock → run the install in a thread
+        try:
+            await loop.run_in_executor(None, self._install_requirements_sync, req_file, current_hash, lf)
         finally:
+            fcntl.flock(lf, fcntl.LOCK_UN)
+            lf.close()
+
+    def _install_requirements_sync(
+        self, req_file: str, current_hash: str, lock_fh=None
+    ):
+        """Synchronous install with cross-process serialization via fcntl.flock.
+
+        If *lock_fh* is given the lock is already held by the caller;
+        otherwise a blocking flock is acquired.
+        """
+        hash_file = os.path.join(self.path, ".requirements_hash")
+
+        if lock_fh is None:
+            lock_file = os.path.join(self.path, ".install.lock")
+            lf = open(lock_file, "w")
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            own_lock = True
+        else:
+            lf = lock_fh
+            own_lock = False
+
+        try:
+            # Double-check: another worker may have installed while we waited
+            if os.path.exists(hash_file):
+                with open(hash_file, "r") as hf:
+                    if hf.read().strip() == current_hash:
+                        return
+
+            start_time = time.time()
+            log.info(f"Installing requirements for plugin {self.id}")
+
+            install_cmd = ["uv", "pip", "install", "--no-cache", "--no-upgrade", "-r", req_file]
+            try:
+                proc = subprocess.Popen(
+                    install_cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                )
+                if proc.stdout:
+                    for line in proc.stdout:
+                        log.debug(line.strip())
+                proc.wait()
+                if proc.returncode != 0:
+                    raise subprocess.CalledProcessError(proc.returncode or 1, install_cmd)
+
+                duration = time.time() - start_time
+                log.info(f"Installation of requirements for {self.id} completed in {duration:.2f}s")
+
+                # Persist hash so future calls take the fast path
+                with open(hash_file, "w") as hf:
+                    hf.write(current_hash)
+            except subprocess.CalledProcessError as e:
+                log.error(f"Error while installing plugin {self.id} requirements: {e}")
+                log.info(f"Uninstalling requirements for: {self.id}")
+                uninstall_cmd = ["uv", "pip", "uninstall", "-r", req_file]
+                try:
+                    proc = subprocess.Popen(
+                        uninstall_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                    )
+                    if proc.stdout:
+                        for line in proc.stdout:
+                            log.debug(line.strip())
+                    proc.wait()
+                    if proc.returncode != 0:
+                        raise subprocess.CalledProcessError(proc.returncode or 1, uninstall_cmd)
+                except Exception as e_:
+                    log.error(f"Error while uninstalling plugin {self.id} requirements: {e_}")
+                raise Exception(f"Error while installing plugin {self.id} requirements")
+        finally:
+            if own_lock:
+                fcntl.flock(lf, fcntl.LOCK_UN)
+                lf.close()
             # Clean __pycache__ directories (cross-platform approach)
             for pycache in Path("/app").rglob("__pycache__"):
                 shutil.rmtree(pycache, ignore_errors=True)
-
-        if has_error:
-            raise Exception(f"Error while installing plugin {self.id} requirements")
 
     # lists of hooks and tools
     def _load_decorated_functions(self):
