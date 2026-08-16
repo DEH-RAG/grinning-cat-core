@@ -8,6 +8,7 @@ __pycache__
 .sisyphus/
 .opencode/
 AGENTS.md
+.omo/
 
 # python local dev
 venv
