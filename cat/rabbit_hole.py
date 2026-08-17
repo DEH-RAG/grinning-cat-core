@@ -266,19 +266,27 @@ class RabbitHole:
         This mirrors the detection used by the PLUS rabbit_hole hook: the active embedder
         instance is resolved to its settings class and `is_multimodal()` tells whether the
         images extracted by multimodal parsers should be embedded and stored in memory.
+
+        The embedder factory must be resolved with the LIZARD's plugin manager (system
+        context): the `factory_allowed_embedders` hooks are declared with a `lizard`
+        parameter (core `base_plugin` and PLUS alike), and `MadHatter.context_execute_hook`
+        passes the caller under the keyword `lizard` only when the executing manager belongs
+        to BillTheLizard. Using an agent plugin manager would pass `cat` instead and make
+        those hooks raise `TypeError: unexpected keyword argument 'cat'`.
         """
         if not self.cat:
             return False
 
+        lizard = self.cat.lizard
         sp = ServiceFactory(
-            agent_key=self.cat.agent_key,
-            hook_manager=self.cat.plugin_manager,
+            agent_key=lizard.agent_key,
+            hook_manager=lizard.plugin_manager,
             factory_allowed_handler_name="factory_allowed_embedders",
             setting_category="embedder",
             schema_name="languageEmbedderName",
         )
         embedder_config = await sp.get_config_class_from_adapter(
-            await self.cat.lizard.embedder()
+            await lizard.embedder()
         )
         return bool(embedder_config) and embedder_config.is_multimodal()
 

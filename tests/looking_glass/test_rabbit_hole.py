@@ -2,6 +2,7 @@ import base64
 
 from langchain_core.documents import Document
 
+from cat.db.database import DEFAULT_SYSTEM_KEY
 from cat.rabbit_hole import RabbitHole
 from cat.services.factory.embedder import MultimodalEmbeddings
 from cat.services.memory.models import VectorMemoryType
@@ -169,3 +170,34 @@ async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatc
 def test_agent_id_is_test_agent(cheshire_cat):
     # guard that tests run against the expected agent key
     assert cheshire_cat.agent_key == agent_id
+
+
+async def test_is_multimodal_embedder_uses_lizard_context(cheshire_cat, monkeypatch):
+    """The embedder factory must run in the lizard (system) plugin-manager context.
+
+    The ``factory_allowed_embedders`` hooks are declared with a ``lizard`` parameter
+    (core base_plugin and PLUS alike): ``MadHatter.context_execute_hook`` passes the
+    caller under that keyword only when the executing plugin manager belongs to
+    BillTheLizard. Using an agent plugin manager would pass ``cat`` and make the
+    hooks raise ``TypeError: unexpected keyword argument 'cat'``.
+    """
+    captured = {}
+
+    class FakeServiceFactory:
+        def __init__(self, agent_key, hook_manager, **kwargs):
+            captured["agent_key"] = agent_key
+            captured["plugin_manager_agent_key"] = hook_manager.agent_key
+            captured["kwargs"] = kwargs
+
+        async def get_config_class_from_adapter(self, obj):
+            return None
+
+    monkeypatch.setattr("cat.rabbit_hole.ServiceFactory", FakeServiceFactory)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+
+    assert await rabbit_hole._is_multimodal_embedder() is False
+
+    assert captured["agent_key"] == DEFAULT_SYSTEM_KEY
+    assert captured["plugin_manager_agent_key"] == DEFAULT_SYSTEM_KEY
