@@ -1,0 +1,171 @@
+import base64
+
+from langchain_core.documents import Document
+
+from cat.rabbit_hole import RabbitHole
+from cat.services.factory.embedder import MultimodalEmbeddings
+from cat.services.memory.models import VectorMemoryType
+
+from tests.utils import agent_id
+
+
+class FakeMultimodalEmbedder(MultimodalEmbeddings):
+    """Minimal multimodal embedder used to exercise the image-ingestion branch."""
+
+    def embed_documents(self, texts):
+        return [[0.1] * 4 for _ in texts]
+
+    def embed_query(self, text):
+        return [0.1] * 4
+
+    def embed_image(self, image):
+        return [0.1] * 4
+
+    def embed_images(self, images):
+        return [[0.1] * 4 for _ in images]
+
+
+
+async def _multimodal(self):  # noqa: ANN001
+    return True
+
+
+async def _text_only(self):  # noqa: ANN001
+    return False
+
+
+def _image_payload(data: bytes, mime: str = "image/jpeg") -> dict:
+    return {
+        "image_base64": base64.b64encode(data).decode(),
+        "image_bytes": data,
+        "image_mime_type": mime,
+    }
+
+
+def test_collect_document_images():
+    rabbit_hole = RabbitHole()
+
+    docs = [
+        Document(page_content="plain text, no images"),
+        Document(page_content="image element", metadata={"image_base64": "aGVsbG8=", "image_mime_type": "image/png"}),
+    ]
+
+    images = rabbit_hole._collect_document_images(docs)
+
+    assert len(images) == 1
+    assert images[0]["image_bytes"] == b"hello"
+    assert images[0]["image_mime_type"] == "image/png"
+
+
+def test_collect_document_images_defaults_mime():
+    rabbit_hole = RabbitHole()
+
+    docs = [Document(page_content="image", metadata={"image_base64": "aGVsbG8="})]
+    images = rabbit_hole._collect_document_images(docs)
+
+    assert images[0]["image_mime_type"] == "image/jpeg"
+
+
+async def test_store_documents_multimodal_embeds_and_stores_images(cheshire_cat, monkeypatch):
+    stored: dict = {}
+
+    async def fake_add_points(collection_name, points):
+        stored["collection"] = collection_name
+        stored["points"] = points
+
+    async def fake_embedder():
+        return FakeMultimodalEmbedder()
+
+    # Force multimodal detection and swap the embedder + the vector memory storage.
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
+    monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    docs = [Document(page_content="a text chunk", metadata={})]
+    images = [_image_payload(b"\x89PNG\r\n\x1a\n")]
+
+    points = await rabbit_hole.store_documents(
+        docs=docs, source="test.txt", file_hash="hash", metadata={}, images=images,
+    )
+
+    assert stored["collection"] == str(VectorMemoryType.DECLARATIVE)
+    # one text point + one image point
+    assert len(points) == 2
+
+    text_points = [p for p in points if not p.payload["metadata"].get("image")]
+    image_points = [p for p in points if p.payload["metadata"].get("image")]
+
+    assert len(text_points) == 1
+    assert len(image_points) == 1
+
+    image_metadata = image_points[0].payload["metadata"]
+    assert image_metadata["image"] is True
+    assert image_metadata["source"] == "test.txt"
+    assert image_metadata["image_base64"] == base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+    assert image_metadata["image_mime_type"] == "image/jpeg"
+
+
+async def test_store_documents_multimodal_uses_agent_embedder(cheshire_cat, monkeypatch):
+    """The image points must come from the agent's own embedder (embed_images)."""
+    stored: dict = {}
+
+    async def fake_add_points(collection_name, points):
+        stored["points"] = points
+
+    calls: dict = {"images": []}
+
+    class RecordingEmbedder(FakeMultimodalEmbedder):
+        def embed_images(self, images):
+            calls["images"] = list(images)
+            return super().embed_images(images)
+
+    async def fake_embedder():
+        return RecordingEmbedder()
+
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
+    monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    docs = [Document(page_content="a text chunk")]
+
+    await rabbit_hole.store_documents(docs=docs, source="test.txt", metadata={}, images=[_image_payload(b"IMG1")])
+
+    # the raw image bytes are what gets embedded
+    assert calls["images"] == [b"IMG1"]
+
+
+async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatch):
+    """When the embedder is not multimodal, images are ignored and only text is stored."""
+    stored: dict = {}
+
+    async def fake_add_points(collection_name, points):
+        stored["points"] = points
+
+    # detection reports a text-only embedder
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _text_only)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    docs = [Document(page_content="a text chunk")]
+
+    points = await rabbit_hole.store_documents(docs=docs, source="test.txt", metadata={}, images=[_image_payload(b"IMG1")])
+
+    # only the text point is stored, the image is dropped
+    assert len(points) == 1
+    assert not points[0].payload["metadata"].get("image")
+
+
+def test_agent_id_is_test_agent(cheshire_cat):
+    # guard that tests run against the expected agent key
+    assert cheshire_cat.agent_key == agent_id

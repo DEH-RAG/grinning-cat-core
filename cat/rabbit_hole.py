@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import hashlib
 import json
 import mimetypes
@@ -15,6 +16,7 @@ from langchain_core.documents.base import Document, Blob
 from cat.log import log
 from cat.services.factory.chunker import BaseChunker
 from cat.services.memory.models import VectorMemoryType, PointStruct
+from cat.services.service_factory import ServiceFactory
 from cat.utils import is_url as fnc_is_url
 
 
@@ -137,7 +139,7 @@ class RabbitHole:
                 raise ValueError("No filename provided.")
 
             # split a file into a list of docs
-            source, file_bytes, content_type, docs, is_url = await self._file_to_docs(
+            source, file_bytes, content_type, docs, images, is_url = await self._file_to_docs(
                 file=file, filename=filename, content_type=content_type
             )
             if not docs:
@@ -147,7 +149,7 @@ class RabbitHole:
             sha256 = hashlib.sha256()
             sha256.update(file_bytes)
             points = await self.store_documents(
-                docs=docs, source=source, file_hash=sha256.hexdigest(), metadata=metadata,
+                docs=docs, source=source, file_hash=sha256.hexdigest(), metadata=metadata, images=images,
             )
 
             # store in file storage
@@ -156,7 +158,10 @@ class RabbitHole:
                 await self.cat.save_file(file_bytes, content_type, source, chat_id)
 
             # notify client
-            await self._send_notification_message(f"Finished reading {source}, I made {len(docs)} thoughts on it.")
+            images_info = f" and {len(images)} images" if images else ""
+            await self._send_notification_message(
+                f"Finished reading {source}, I made {len(docs)} thoughts{images_info} on it."
+            )
 
             log.info(f"Agent id: {self.cat.agent_key}. Successfully ingested file: {filename}")
         except Exception as e:
@@ -175,7 +180,7 @@ class RabbitHole:
 
     async def _file_to_docs(
         self, file: str | BytesIO, filename: str, content_type: str | None = None
-    ) -> Tuple[str, bytes, str | None, List[Document], bool]:
+    ) -> Tuple[str, bytes, str | None, List[Document], List[Dict], bool]:
         """
         Load and convert files to Langchain `Document`.
 
@@ -188,8 +193,9 @@ class RabbitHole:
             content_type (str): The content type of the file. If not provided, it will be guessed based on the file extension.
 
         Returns:
-            (source, file_bytes, content_type, docs, is_url): Tuple[str, bytes, str | None, List[Document], bool].
-                The file name, the file content in bytes, the content type, the list of chunked Langchain `Document` and
+            (source, file_bytes, content_type, docs, images, is_url): Tuple[str, bytes, str | None, List[Document], List[Dict], bool].
+                The file name, the file content in bytes, the content type, the list of chunked Langchain `Document`,
+                the list of images extracted by multimodal parsers (empty for text-only embedders) and
                 a boolean indicating if the file was loaded from a URL.
         """
         def sanitize_filename(file_name: str) -> str:
@@ -243,10 +249,64 @@ class RabbitHole:
             Blob(data=file_bytes, mimetype=content_type).from_data(data=file_bytes, mime_type=content_type, path=source)
         )
 
+        # Collect the images extracted by multimodal parsers (if a multimodal embedder is active).
+        # This must happen BEFORE chunking: the chunkers may drop or alter the metadata that carries
+        # the image payload (e.g. PLUS SemanticChunker discards metadata, _merge_short_chunks keeps
+        # only the first chunk's metadata).
+        images = self._collect_document_images(super_docs) if await self._is_multimodal_embedder() else []
+
         # Split
         await self._send_notification_message("Parsing completed. Now let's go with reading process...")
         docs = await self._split_text(docs=super_docs)
-        return source, file_bytes, content_type, docs, is_url  # type: ignore[return-value]
+        return source, file_bytes, content_type, docs, images, is_url  # type: ignore[return-value]
+
+    async def _is_multimodal_embedder(self) -> bool:
+        """Check whether the active embedder supports multimodality.
+
+        This mirrors the detection used by the PLUS rabbit_hole hook: the active embedder
+        instance is resolved to its settings class and `is_multimodal()` tells whether the
+        images extracted by multimodal parsers should be embedded and stored in memory.
+        """
+        if not self.cat:
+            return False
+
+        sp = ServiceFactory(
+            agent_key=self.cat.agent_key,
+            hook_manager=self.cat.plugin_manager,
+            factory_allowed_handler_name="factory_allowed_embedders",
+            setting_category="embedder",
+            schema_name="languageEmbedderName",
+        )
+        embedder_config = await sp.get_config_class_from_adapter(
+            await self.cat.lizard.embedder()
+        )
+        return bool(embedder_config) and embedder_config.is_multimodal()
+
+    def _collect_document_images(self, docs: List[Document]) -> List[Dict]:
+        """Collect the images extracted by multimodal parsers from the parsed documents.
+
+        Multimodal parsers (e.g. the PLUS `UnstructuredParser` configured with
+        `extract_image_block_to_payload=True`) attach each extracted image to the parsed
+        `Document` metadata as a base64-encoded payload in `image_base64`, with the mime
+        type in `image_mime_type`. This helper walks the parsed documents and returns one
+        entry per image, carrying the raw bytes ready to be embedded and the base64 payload
+        to be stored in the vector memory metadata.
+
+        Returns:
+            List[Dict]: A list of dicts with keys ``image_base64``, ``image_bytes`` and
+            ``image_mime_type`` (defaulting to ``image/jpeg``).
+        """
+        images: List[Dict] = []
+        for doc in docs:
+            image_base64 = doc.metadata.get("image_base64")
+            if not image_base64:
+                continue
+            images.append({
+                "image_base64": image_base64,
+                "image_bytes": base64.b64decode(image_base64),
+                "image_mime_type": doc.metadata.get("image_mime_type", "image/jpeg"),
+            })
+        return images
 
     async def store_documents(
         self,
@@ -254,20 +314,28 @@ class RabbitHole:
         source: str,
         file_hash: str | None = None,
         metadata: Dict | None = None,
+        images: List[Dict] | None = None,
     ) -> List[PointStruct]:
         """Add documents to the Cat's declarative memory.
 
         This method loops a list of Langchain `Document` and adds some metadata. Namely, the source filename and the
         timestamp of insertion. Once done, the method notifies the client via Websocket connection.
 
+        If a multimodal embedder is active and the multimodal parsers extracted some images, this method also embeds
+        the images via ``embed_images`` and stores them in the same collection, keeping the base64 payload of each
+        image in its metadata.
+
         Args:
             docs (List[Document]): List of Langchain `Document` to be inserted in the Cat's declarative memory.
             source (str): Source name to be added as a metadata. It can be a file name or an URL.
             file_hash (str | None): Optional hash of the source to be added as a metadata.
             metadata (Dict | None): Optional metadata to be stored with each chunk.
+            images (List[Dict] | None): Optional images extracted by multimodal parsers. Each entry has
+                ``image_base64``, ``image_bytes`` and ``image_mime_type`` keys.
 
         Returns:
-            stored_points (List[PointStruct]): List of points stored in the Cat's declarative memory.
+            stored_points (List[PointStruct]): List of points stored in the Cat's declarative memory
+                (text chunks and, if any, image points).
 
         See Also:
             before_rabbithole_stores_documents
@@ -306,6 +374,33 @@ class RabbitHole:
             payload=doc.model_dump(),
             vector=vector,
         ) for doc, vector in zip(valid_documents, storing_vectors)]
+
+        # If a multimodal embedder is active and the multimodal parsers extracted some images,
+        # embed them and add them to the same collection as the text chunks.
+        if images and await self._is_multimodal_embedder():
+            image_vectors = await asyncio.to_thread(
+                lambda: embedder.embed_images([img["image_bytes"] for img in images])
+            )
+            image_points = [
+                PointStruct(
+                    id=uuid.uuid4().hex,
+                    vector=vector,
+                    payload={
+                        "page_content": f"[Image] {source}",
+                        "metadata": {
+                            **(metadata or {}),
+                            "source": source,
+                            "when": time.time(),
+                            "hash": file_hash,
+                            "image": True,
+                            "image_base64": img["image_base64"],
+                            "image_mime_type": img["image_mime_type"],
+                        },
+                    },
+                )
+                for img, vector in zip(images, image_vectors)
+            ]
+            points.extend(image_points)
 
         collection_name = str(VectorMemoryType.DECLARATIVE if not self.stray else VectorMemoryType.EPISODIC)
         await self.cat.vector_memory_handler.add_points_to_tenant(collection_name=collection_name, points=points)
