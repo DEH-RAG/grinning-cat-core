@@ -338,8 +338,8 @@ class RabbitHole:
         timestamp of insertion. Once done, the method notifies the client via Websocket connection.
 
         If a multimodal embedder is active and the multimodal parsers extracted some images, this method also embeds
-        the images via ``embed_images`` and stores them in the same collection, keeping the base64 payload of each
-        image in its metadata.
+        the images via ``embed_images``, saves them as files in the agent/chat storage via ``save_file`` and stores
+        them in the same collection, keeping the file name in the point metadata (``image_file``, no base64 payload).
 
         Args:
             docs (List[Document]): List of Langchain `Document` to be inserted in the Cat's declarative memory.
@@ -347,7 +347,8 @@ class RabbitHole:
             file_hash (str | None): Optional hash of the source to be added as a metadata.
             metadata (Dict | None): Optional metadata to be stored with each chunk.
             images (List[Dict] | None): Optional images extracted by multimodal parsers. Each entry has
-                ``image_base64``, ``image_bytes`` and ``image_mime_type`` keys.
+                ``image_base64``, ``image_bytes`` and ``image_mime_type`` keys. The images are embedded and saved
+                as files via ``save_file``; the point metadata only keeps the file name in ``image_file``.
 
         Returns:
             stored_points (List[PointStruct]): List of points stored in the Cat's declarative memory
@@ -397,8 +398,12 @@ class RabbitHole:
             image_vectors = await asyncio.to_thread(
                 lambda: embedder.embed_images([img["image_bytes"] for img in images])
             )
-            image_points = [
-                PointStruct(
+            chat_id = self.stray.id if self.stray else None
+            image_points = []
+            for idx, (img, vector) in enumerate(zip(images, image_vectors)):
+                image_file = self._image_file_name(source, idx, img["image_mime_type"], img["image_bytes"])
+                await self.cat.save_file(img["image_bytes"], img["image_mime_type"], image_file, chat_id)
+                image_points.append(PointStruct(
                     id=uuid.uuid4().hex,
                     vector=vector,
                     payload={
@@ -409,19 +414,28 @@ class RabbitHole:
                             "when": time.time(),
                             "hash": file_hash,
                             "image": True,
-                            "image_base64": img["image_base64"],
-                            "image_mime_type": img["image_mime_type"],
+                            "image_file": image_file,
                         },
                     },
-                )
-                for img, vector in zip(images, image_vectors)
-            ]
+                ))
             points.extend(image_points)
 
         collection_name = str(VectorMemoryType.DECLARATIVE if not self.stray else VectorMemoryType.EPISODIC)
         await self.cat.vector_memory_handler.add_points_to_tenant(collection_name=collection_name, points=points)
 
         return points
+
+    def _image_file_name(self, source: str, index: int, mime_type: str, image_bytes: bytes) -> str:
+        """Deterministic, unique file name for an extracted image.
+
+        The stem comes from the source file name so the association between an
+        image and the document it was extracted from is recoverable by name.
+        """
+        stem = os.path.splitext(os.path.basename(source))[0]
+        stem = re.sub(r"[^a-zA-Z0-9._-]", "_", stem).strip("._") or "image"
+        ext = mimetypes.guess_extension(mime_type or "") or ".png"
+        digest = hashlib.sha256(image_bytes).hexdigest()[:8]
+        return f"{stem}_img_{index}_{digest}{ext}"
 
     async def _split_text(self, docs: List[Document]):
         """Split LangChain documents in chunks.

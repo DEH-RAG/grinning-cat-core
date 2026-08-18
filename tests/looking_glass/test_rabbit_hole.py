@@ -82,6 +82,14 @@ async def test_store_documents_multimodal_embeds_and_stores_images(cheshire_cat,
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
 
+    # Record save_file calls instead of writing the image files to the real storage.
+    saved_files: list = []
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        saved_files.append((file_bytes, content_type, source, chat_id))
+
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+
     rabbit_hole = RabbitHole()
     rabbit_hole.cat = cheshire_cat
     rabbit_hole.stray = None
@@ -106,8 +114,14 @@ async def test_store_documents_multimodal_embeds_and_stores_images(cheshire_cat,
     image_metadata = image_points[0].payload["metadata"]
     assert image_metadata["image"] is True
     assert image_metadata["source"] == "test.txt"
-    assert image_metadata["image_base64"] == base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
-    assert image_metadata["image_mime_type"] == "image/jpeg"
+    assert "image_base64" not in image_metadata
+    assert "image_mime_type" not in image_metadata
+    image_file = image_metadata["image_file"]
+    assert image_file.startswith("test_img_0_")
+    assert image_file.endswith(".jpg")
+
+    # the image was saved as a file, not embedded in the point metadata
+    assert saved_files == [(b"\x89PNG\r\n\x1a\n", "image/jpeg", image_file, None)]
 
 
 async def test_store_documents_multimodal_uses_agent_embedder(cheshire_cat, monkeypatch):
@@ -131,6 +145,14 @@ async def test_store_documents_multimodal_uses_agent_embedder(cheshire_cat, monk
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
 
+    # Record save_file calls instead of writing the image files to the real storage.
+    saved_files: list = []
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        saved_files.append((file_bytes, content_type, source, chat_id))
+
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+
     rabbit_hole = RabbitHole()
     rabbit_hole.cat = cheshire_cat
     rabbit_hole.stray = None
@@ -141,6 +163,10 @@ async def test_store_documents_multimodal_uses_agent_embedder(cheshire_cat, monk
 
     # the raw image bytes are what gets embedded
     assert calls["images"] == [b"IMG1"]
+
+    # the image was saved as a file in the agent storage
+    assert len(saved_files) == 1
+    assert saved_files[0][2].startswith("test_img_")
 
 
 async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatch):

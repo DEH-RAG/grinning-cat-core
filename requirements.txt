@@ -134,7 +134,7 @@ httpx-ws==0.9.0
     # via grinning-cat (pyproject.toml)
 hyperframe==6.1.0
     # via h2
-idna==3.18
+idna==3.19
     # via
     #   anyio
     #   email-validator

@@ -157,12 +157,40 @@ async def delete_file(
         # delete the file from the file storage
         res = info.cheshire_cat.file_manager.remove_file(os.path.join(path, sanitized_source))
 
+        # remove the extracted-image files of this source before the memory
+        # points are deleted (their metadata records the file names)
+        await _delete_source_image_files(
+            info.cheshire_cat, str(collection_id), path, source_name,
+        )
+
         # delete points
         await info.cheshire_cat.vector_memory_handler.delete_tenant_points(str(collection_id), metadata)  # type: ignore[arg-type]
 
         return FileManagerDeletedFiles(deleted=res)
     except Exception as e:
         raise CustomValidationException(f"Failed to delete memory points: {e}")
+
+
+async def _delete_source_image_files(cheshire_cat, collection_id: str, path: str, source_name: str) -> None:
+    """Remove every stored image file extracted from ``source_name``.
+
+    Image points carry ``metadata.image == True`` and the saved file name in
+    ``metadata.image_file``; query them by source before the points are deleted
+    and remove the corresponding files from the agent storage. Works with any
+    BaseVectorDatabaseHandler implementation (Qdrant or the Neo4j GraphRAG one).
+    """
+    offset = None
+    while True:
+        points, offset = await cheshire_cat.vector_memory_handler.get_all_tenant_points(
+            collection_name=collection_id, limit=100, offset=offset,
+            metadata={"source": source_name, "image": True},
+        )
+        for point in points:
+            image_file = (point.payload or {}).get("metadata", {}).get("image_file")
+            if image_file:
+                cheshire_cat.file_manager.remove_file(os.path.join(path, image_file))
+        if offset is None:
+            break
 
 
 @router.delete("/files")
