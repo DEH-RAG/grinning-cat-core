@@ -3,4 +3,6 @@
 apscheduler==3.11.0
     # via -r cat/core_plugins/white_rabbit/requirements.txt
 tzlocal==5.3.1
-    # via apscheduler
+    # via
+    #   -r cat/core_plugins/white_rabbit/requirements.txt
+    #   apscheduler

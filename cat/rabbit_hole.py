@@ -249,6 +249,14 @@ class RabbitHole:
             Blob(data=file_bytes, mimetype=content_type).from_data(data=file_bytes, mime_type=content_type, path=source)
         )
 
+        # Propagate the source to every parsed document BEFORE chunking, so that
+        # hooks such as `before_rabbithole_splits_documents` can rely on it
+        # (metadata['source'] is otherwise only added later, in store_documents).
+        # setdefault preserves a more specific source set by the parser itself.
+        for doc in super_docs:
+            if isinstance(doc.metadata, dict):
+                doc.metadata.setdefault("source", source)
+
         # Collect the images extracted by multimodal parsers (if a multimodal embedder is active).
         # This must happen BEFORE chunking: the chunkers may drop or alter the metadata that carries
         # the image payload (e.g. PLUS SemanticChunker discards metadata, _merge_short_chunks keeps
