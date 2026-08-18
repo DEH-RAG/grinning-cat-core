@@ -264,6 +264,14 @@ class RabbitHole:
         # only the first chunk's metadata).
         images = self._collect_document_images(super_docs) if await self._is_multimodal_embedder() else []
 
+        # The image payload was consumed above to embed and save the images as files:
+        # strip it from the parsed documents so it is neither duplicated into every
+        # text chunk's metadata nor stored in the vector DB (where it would bloat the
+        # payloads and be forwarded to the LLM on recall).
+        if images:
+            for doc in super_docs:
+                doc.metadata.pop("image_base64", None)
+
         # Split
         await self._send_notification_message("Parsing completed. Now let's go with reading process...")
         docs = await self._split_text(docs=super_docs)
@@ -376,6 +384,11 @@ class RabbitHole:
 
         # add custom metadata (sent via endpoint) and default metadata (source and when and eventual chat_id)
         for doc in docs:
+            # Drop the transient parser image payload, if any: images are embedded and
+            # saved as files separately, so their content must never reach the vector
+            # DB metadata (and from there the LLM context on recall). This also covers
+            # direct callers that pass documents still carrying image_base64.
+            doc.metadata.pop("image_base64", None)
             doc.metadata = (
                     doc.metadata
                     | metadata

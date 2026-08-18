@@ -278,6 +278,58 @@ async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatc
     assert not points[0].payload["metadata"].get("image")
 
 
+async def test_text_points_do_not_carry_image_base64(cheshire_cat, monkeypatch):
+    """The base64 image payload must not be stored in the TEXT points' metadata.
+
+    Documents produced by a multimodal parser carry ``image_base64`` in their
+    metadata; the default chunker clones that metadata onto every text chunk.
+    The image content must be removed before the text points are stored, so it
+    is neither persisted in the vector DB nor forwarded to the LLM on recall.
+    """
+    stored: dict = {}
+
+    async def fake_add_points(collection_name, points):
+        stored["points"] = points
+
+    async def fake_embedder():
+        return FakeMultimodalEmbedder()
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        return source
+
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
+    monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    img_data = b"\x89PNG\r\n\x1a\n"
+    docs = [
+        Document(
+            page_content="a text chunk that surrounds an extracted image",
+            metadata={
+                "image_base64": base64.b64encode(img_data).decode(),
+                "image_mime_type": "image/jpeg",
+                "other_metadata": "keep me",
+            },
+        )
+    ]
+
+    points = await rabbit_hole.store_documents(
+        docs=docs, source="test.txt", metadata={}, images=[_image_payload(img_data)],
+    )
+
+    text_points = [p for p in points if not p.payload["metadata"].get("image")]
+    assert len(text_points) == 1
+    text_metadata = text_points[0].payload["metadata"]
+    assert "image_base64" not in text_metadata
+    # the rest of the metadata survives untouched
+    assert text_metadata["other_metadata"] == "keep me"
+
+
 def test_agent_id_is_test_agent(cheshire_cat):
     # guard that tests run against the expected agent key
     assert cheshire_cat.agent_key == agent_id
