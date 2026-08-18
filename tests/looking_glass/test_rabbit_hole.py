@@ -210,6 +210,50 @@ async def test_store_documents_multimodal_in_conversation_adds_chat_id(cheshire_
     assert saved_files[0][3] == "chat_abc"
 
 
+async def test_store_documents_multimodal_image_source_does_not_duplicate(cheshire_cat, monkeypatch):
+    """Uploading an image file embeds the whole file (no derived files/points).
+
+    The hi_res parser can split an image into sub-crops: those must be ignored and
+    the source file itself embedded as a single image point (image_file = source).
+    """
+    stored: dict = {}
+    saved_files: list = []
+
+    async def fake_add_points(collection_name, points):
+        stored["points"] = points
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        saved_files.append((file_bytes, content_type, source, chat_id))
+
+    async def fake_embedder():
+        return FakeMultimodalEmbedder()
+
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
+    monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    docs = [Document(page_content="")]
+    source_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 16  # fake jpeg payload
+    # parser crops for the image source (must be ignored)
+    crops = [_image_payload(b"crop1", mime="image/jpeg"), _image_payload(b"crop2", mime="image/jpeg")]
+
+    points = await rabbit_hole.store_documents(
+        docs=docs, source="photo.jpeg", metadata={}, images=crops, source_bytes=source_bytes,
+    )
+
+    image_points = [p for p in points if p.payload["metadata"].get("image")]
+    # exactly ONE image point, no derived files
+    assert len(image_points) == 1
+    assert image_points[0].payload["metadata"]["image_file"] == "photo.jpeg"
+    assert image_points[0].payload["metadata"]["source"] == "photo.jpeg"
+    assert saved_files == []
+
+
 async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatch):
     """When the embedder is not multimodal, images are ignored and only text is stored."""
     stored: dict = {}

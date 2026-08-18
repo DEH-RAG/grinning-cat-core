@@ -150,6 +150,7 @@ class RabbitHole:
             sha256.update(file_bytes)
             points = await self.store_documents(
                 docs=docs, source=source, file_hash=sha256.hexdigest(), metadata=metadata, images=images,
+                source_bytes=file_bytes,
             )
 
             # store in file storage
@@ -331,6 +332,7 @@ class RabbitHole:
         file_hash: str | None = None,
         metadata: Dict | None = None,
         images: List[Dict] | None = None,
+        source_bytes: bytes | None = None,
     ) -> List[PointStruct]:
         """Add documents to the Cat's declarative memory.
 
@@ -349,6 +351,9 @@ class RabbitHole:
             images (List[Dict] | None): Optional images extracted by multimodal parsers. Each entry has
                 ``image_base64``, ``image_bytes`` and ``image_mime_type`` keys. The images are embedded and saved
                 as files via ``save_file``; the point metadata only keeps the file name in ``image_file``.
+            source_bytes (bytes | None): Optional raw bytes of the ingested source file. Used when the source
+                itself is an image: the file is embedded as a single whole-image point instead of the parser
+                sub-crops, and no derived file is created.
 
         Returns:
             stored_points (List[PointStruct]): List of points stored in the Cat's declarative memory
@@ -395,15 +400,28 @@ class RabbitHole:
         # If a multimodal embedder is active and the multimodal parsers extracted some images,
         # embed them and add them to the same collection as the text chunks.
         if images and await self._is_multimodal_embedder():
-            image_vectors = await asyncio.to_thread(
-                lambda: embedder.embed_images([img["image_bytes"] for img in images])
-            )
             chat_id = self.stray.id if self.stray else None
-            image_points = []
-            for idx, (img, vector) in enumerate(zip(images, image_vectors)):
-                image_file = self._image_file_name(source, idx, img["image_mime_type"], img["image_bytes"])
-                await self.cat.save_file(img["image_bytes"], img["image_mime_type"], image_file, chat_id)
-                image_points.append(PointStruct(
+            is_image_source = (mimetypes.guess_type(source)[0] or "").startswith("image/")
+
+            if is_image_source:
+                # Uploaded image files: the parser (hi_res) can split the file into
+                # sub-crops. Embed the source file itself as a single whole-image
+                # point (image_file = the source, no derived file) and ignore crops.
+                whole_image = source_bytes if source_bytes is not None else (images[0]["image_bytes"] if images else None)
+                embeds = await asyncio.to_thread(lambda: embedder.embed_images([whole_image])) if whole_image is not None else []
+                files_and_vectors = [(source, embeds[0])] if embeds else []
+            else:
+                image_vectors = await asyncio.to_thread(
+                    lambda: embedder.embed_images([img["image_bytes"] for img in images])
+                )
+                files_and_vectors = []
+                for idx, (img, vector) in enumerate(zip(images, image_vectors)):
+                    image_file = self._image_file_name(source, idx, img["image_mime_type"], img["image_bytes"])
+                    await self.cat.save_file(img["image_bytes"], img["image_mime_type"], image_file, chat_id)
+                    files_and_vectors.append((image_file, vector))
+
+            image_points = [
+                PointStruct(
                     id=uuid.uuid4().hex,
                     vector=vector,
                     payload={
@@ -418,7 +436,9 @@ class RabbitHole:
                             **({"chat_id": self.stray.id} if self.stray else {}),
                         },
                     },
-                ))
+                )
+                for image_file, vector in files_and_vectors
+            ]
             points.extend(image_points)
 
         collection_name = str(VectorMemoryType.DECLARATIVE if not self.stray else VectorMemoryType.EPISODIC)
