@@ -1,4 +1,5 @@
 import base64
+import types
 
 from langchain_core.documents import Document
 
@@ -167,6 +168,46 @@ async def test_store_documents_multimodal_uses_agent_embedder(cheshire_cat, monk
     # the image was saved as a file in the agent storage
     assert len(saved_files) == 1
     assert saved_files[0][2].startswith("test_img_")
+
+
+async def test_store_documents_multimodal_in_conversation_adds_chat_id(cheshire_cat, monkeypatch):
+    """In a conversation (stray set), image points carry chat_id in their metadata
+    and the image file is saved under the conversation id."""
+    stored: dict = {}
+
+    async def fake_add_points(collection_name, points):
+        stored["collection"] = collection_name
+        stored["points"] = points
+
+    saved_files: list = []
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        saved_files.append((file_bytes, content_type, source, chat_id))
+
+    async def fake_embedder():
+        return FakeMultimodalEmbedder()
+
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
+    monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = types.SimpleNamespace(id="chat_abc")
+
+    docs = [Document(page_content="a text chunk")]
+
+    await rabbit_hole.store_documents(docs=docs, source="test.txt", metadata={}, images=[_image_payload(b"IMG1")])
+
+    # image points land in the episodic collection and carry chat_id
+    assert stored["collection"] == str(VectorMemoryType.EPISODIC)
+    image_points = [p for p in stored["points"] if p.payload["metadata"].get("image")]
+    assert len(image_points) == 1
+    assert image_points[0].payload["metadata"]["chat_id"] == "chat_abc"
+    # the saved image file is scoped to the conversation
+    assert len(saved_files) == 1
+    assert saved_files[0][3] == "chat_abc"
 
 
 async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatch):

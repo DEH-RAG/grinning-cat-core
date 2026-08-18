@@ -415,6 +415,7 @@ class RabbitHole:
                             "hash": file_hash,
                             "image": True,
                             "image_file": image_file,
+                            **({"chat_id": self.stray.id} if self.stray else {}),
                         },
                     },
                 ))
