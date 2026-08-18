@@ -99,7 +99,7 @@ griffelib==2.2.0
     # via fastmcp-slim
 grpcio==1.83.0
     # via qdrant-client
-gunicorn==26.0.0
+gunicorn==26.1.0
     # via grinning-cat (pyproject.toml)
 h11==0.16.0
     # via
@@ -254,7 +254,6 @@ ormsgpack==1.12.2
 packaging==26.3
     # via
     #   fastmcp-slim
-    #   gunicorn
     #   langchain-core
     #   langsmith
     #   pytest
