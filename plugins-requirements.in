@@ -1,0 +1,110 @@
+# =============================================================================
+# plugins-requirements.in
+# Aggregated plugin dependencies for Grinning Cat (MyCAT / DEH-RAG fork)
+# Compiled together with pyproject.toml, targeting the same Python version as
+# the runtime image in Dockerfile:dhi (FROM dhi.io/python:3.13-dev → 3.13):
+#     uv pip compile -o requirements-full.txt --python-version 3.13 pyproject.toml plugins-requirements.in
+# =============================================================================
+
+# --- cat_alog ---------------------------------------------------------------
+langchain-core>=1.3.0
+
+# --- cat-graphrag.my (= cat-graphrag, DEH-RAG) ------------------------------
+langdetect>=1.0.9
+neo4j>=6.1.0
+spacy>=3.8.14
+spacy-transformers>=1.4.0
+numpy>=2.4.4
+
+# --- cat-search -------------------------------------------------------------
+googlesearch-python
+
+# --- cat_with_google_drive --------------------------------------------------
+google-api-python-client>=2.194.0
+google-api-python-client-stubs>=1.35.0
+google-auth-oauthlib>=1.3.1
+google-auth-httplib2>=0.3.1
+
+# --- cat-with-your-data -----------------------------------------------------
+langchain-experimental
+mysql-connector-python
+psycopg2-binary
+tabulate==0.9.0
+
+# --- ccat-reranker ----------------------------------------------------------
+# NOTE: upstream pins sentence-transformers==4.1.0 and unstructured==0.18.1.
+# They conflict with grinning_cat_plus.my (sentence-transformers>=5.1.2,
+# unstructured[all-docs]>=0.22): the strict pins below have been relaxed to
+# the newer bounds so a single environment can serve every plugin.
+sentence-transformers>=5.1.2
+unstructured[all-docs]>=0.22
+
+# --- cc_mistral_ocr ---------------------------------------------------------
+# (mistralai dependency commented out upstream; only core deps used)
+
+# --- cc_prompt_settings -----------------------------------------------------
+langdetect>=1.0.9
+translate>=3.8.0
+
+# --- cc_scrapycat -----------------------------------------------------------
+bs64
+crawl4ai[pdf]>=0.8.6
+
+# --- exercise-generator-plugin ----------------------------------------------
+pandas>=3.0.2
+pydantic>=2.13.2
+
+# --- GC---Math-Solver -------------------------------------------------------
+sympy
+
+# --- grinning_cat_plus.my (DEH-RAG) -----------------------------------------
+# NOTE: audioop-lts is a Python>=3.13 backport of the stdlib audioop module
+# (needed by pydub on 3.13+). On 3.11/3.12 audioop is still in the stdlib.
+audioop-lts; python_version >= "3.13"
+azure-storage-blob>=12.27.0
+boto3>=1.40.57
+fastembed>=0.7.3
+faster-whisper
+google-cloud-storage>=3.4.1
+langchain-anthropic>=1.0.0
+langchain-cohere>=0.4.6
+langchain-google-genai>=3.0.0
+langchain-groq>=1.0.0
+langchain-mistralai>=1.0.0
+langchain-ollama>=1.0.0
+langchain-openai>=1.0.1
+langchain-unstructured>=0.1.6
+langchain-voyageai>=0.1.7
+nltk>=3.9.2
+odfpy
+openpyxl>=3.1.0
+pdfminer-six>=20260107
+pydub
+python-pptx>=1.0.0
+pytube>=15.0.0
+text-generation>=0.7.0
+xlrd>=2.0.1
+youtube-transcript-api>=1.2.3
+
+# --- grinning-cat-weaviate --------------------------------------------------
+weaviate-client
+
+# --- guard-plugin -----------------------------------------------------------
+# NOTE: upstream pins langchain-openai==1.0.1; kept as a lower bound to stay
+# consistent with grinning_cat_plus.my (>=1.0.1).
+langchain-openai>=1.0.1
+
+# =============================================================================
+# Plugins without extra dependencies (core-only, verified by import scan):
+#   cat-agent-skills-plugin, cat-react, cc_hybrid_search, cc_mistral_ocr
+# Ignored directories (per user request / not part of the plugin set):
+#   DA_VEDERE/*, OK/*
+# =============================================================================
+
+# --- core_plugins/base_plugin (in-repo, installed at build) -----------------
+bs4
+pdfminer-six>=20260107
+pymupdf
+
+# --- core_plugins/white_rabbit (in-repo, installed at build) ----------------
+apscheduler

@@ -89,6 +89,15 @@ extend-ignore = ["E722", "F821", "E741"]
 
 [tool.uv]
 package = true
+# Keep the core lock aligned with the aggregated plugin resolution
+# (requirements-full.txt). Without these constraints, uv.lock would pick
+# newer grpcio/protobuf/xxhash that plugin installs (google-api-core,
+# crawl4ai, langgraph) would then downgrade at build/runtime.
+constraint-dependencies = [
+    "grpcio==1.78.0",
+    "protobuf==6.33.6",
+    "xxhash==3.8.1",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
