@@ -41,8 +41,7 @@ install: ## Update the local virtual environment with the latest requirements.
 	@pip cache purge
 
 update: ## Update and compile requirements for the local virtual environment.
-	@uv sync --upgrade --link-mode=copy --no-install-project --no-cache
-	@find $(PWD)/cat/core_plugins -name requirements.txt -exec uv pip install --link-mode=copy --no-cache --no-upgrade -r {} \;
+	@uv sync --upgrade --link-mode=copy --no-install-project --no-cache --extra plugins
 	@uv cache clean
 	@pip cache purge
 	@rm -rf *.egg-info
@@ -60,13 +59,22 @@ make-migration:  ## Create the migration file after changing the models. Argumen
 	fi
 	@docker exec -it grinning_cat_core uv run python migrations/manage_migrations.py revision -m "${args}"
 
+BUILD_PROXY ?= http://10.42.0.1:3142
+BUILD_NO_PROXY ?= localhost,127.0.0.1,::1,.intranet
+
 dhi: update-requirements
-	docker buildx build . -f Dockerfile:dhi -t grinning-cat-core:dhi
+	docker buildx build . -f Dockerfile:dhi -t grinning-cat-core:dhi \
+		--build-arg HTTP_PROXY=$(BUILD_PROXY) \
+		--build-arg HTTPS_PROXY=$(BUILD_PROXY) \
+		--build-arg NO_PROXY=$(BUILD_NO_PROXY)
 dev: update-requirements
-	docker buildx build . -f Dockerfile:dhi -t grinning-cat-core:dev
+	docker buildx build . -f Dockerfile:dhi -t grinning-cat-core:dev \
+		--build-arg HTTP_PROXY=$(BUILD_PROXY) \
+		--build-arg HTTPS_PROXY=$(BUILD_PROXY) \
+		--build-arg NO_PROXY=$(BUILD_NO_PROXY)
 update-requirements:
 	git pull
 	docker pull dhi.io/python:3.13-dev
-	uv pip compile -U -o requirements.txt pyproject.toml
-	find cat -name requirements.txt | xargs -I% uv pip compile -o % %
+	uv lock --upgrade --python 3.13
+	uv pip compile --python-version 3.13 --extra plugins -o requirements-full.txt pyproject.toml
 
