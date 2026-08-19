@@ -1,6 +1,12 @@
 __pycache__
+*.egg-info
 
 **/long_term_memory
 **/local_vector_memory
 **/venv
+**/.venv
+**/.ruff_cache
+**/.pytest_cache
+**/.install.lock
+**/.requirements_hash
 **/dormouse
