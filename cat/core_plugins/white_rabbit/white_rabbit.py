@@ -348,6 +348,9 @@ class WhiteRabbit:
             job_id = f"{job.__name__}-interval-{days}-{hours}-{minutes}-{seconds}"
 
         # Schedule the job
+        # replace_existing=True makes scheduling idempotent across workers/replicas:
+        # they all share the same RedisJobStore, so without it a second worker adding
+        # the same job id raises ConflictingIdError (and get→remove→add is not atomic).
         self.scheduler.add_job(
             job,
             "interval",
@@ -359,6 +362,7 @@ class WhiteRabbit:
             minutes=minutes,
             seconds=seconds,
             kwargs=kwargs,
+            replace_existing=True,
         )
         self.jobs.append(job_id)
 

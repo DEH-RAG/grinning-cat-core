@@ -47,9 +47,9 @@ async def after_lizard_bootstrap(lizard: BillTheLizard):
     if not interval_job_days:
         return
 
-    if lizard.white_rabbit.get_job(scheduled_job_id):
-        lizard.white_rabbit.remove_job(scheduled_job_id)
-
+    # schedule_interval_job uses replace_existing=True, so re-scheduling the same
+    # job id is idempotent across the N workers that run this hook against the shared
+    # RedisJobStore. No explicit get/remove needed (and get→remove→add is racy).
     lizard.white_rabbit.schedule_interval_job(
         job=re_embed_mcp_tools,
         job_id=scheduled_job_id,
