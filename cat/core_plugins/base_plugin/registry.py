@@ -14,6 +14,7 @@ class CheshireCatPluginRegistry(PluginRegistry):
         return "https://grinning-cat-plugins-backend-latest.onrender.com"
 
     async def search_plugins(self, query: str = None) -> List[PluginManifest]:
+        return [] # AS: the plugin repository is not UP at the moment
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 # search plugins if a query is provided, list plugins (no search) otherwise
