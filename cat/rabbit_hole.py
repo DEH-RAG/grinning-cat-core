@@ -396,16 +396,16 @@ class RabbitHole:
                     | ({"chat_id": self.stray.id} if self.stray else {})
             )
 
-        # hook the docs before they are stored in the vector memory
+# hook the docs before they are stored in the vector memory
         docs = await plugin_manager.execute_hook("before_rabbithole_stores_documents", docs, caller=self.stray or self.cat)
 
         # Store-time sizing guard for documents added by post-chunking hooks
-        # (e.g. CAT_ALOG's catalogue card). These are ATOMIC retrieval units:
-        # splitting one into sub-chunks would fragment retrieval (a card query
-        # would return only a part). So oversized hook-injected docs are instead
-        # truncated from the HEAD, keeping the informative tail (where a card
-        # holds its "## Summary"), as a single point.
-        docs = self._truncate_to_budget(docs, embedder)
+        # (e.g. CAT_ALOG's catalogue card). These are split into budget-compliant
+        # in-place sub-chunks (metadata inherited, ordering preserved), so the
+        # full content is always stored with no loss. Atomic plugin units that
+        # wrap their full text into metadata (e.g. CAT_ALOG's full_card) keep the
+        # whole unit retrievable from any of their sub-chunks.
+        docs = self._split_oversized(docs, embedder)
 
         # hook the points before they are stored in the vector memory
         valid_documents = list(filter(lambda doc_: doc_.page_content.strip(), docs))
@@ -630,52 +630,6 @@ class RabbitHole:
                 metadata=doc.metadata,
             ))
         return sub_docs
-
-    def _truncate_to_budget(self, docs: List[Document], embedder) -> List[Document]:
-        """Ensure store-time (hook-injected) documents fit the embedder's window.
-
-        Unlike ``_split_oversized`` (used in the chunking phase, where splitting
-        into many retrievable chunks is correct), documents appended after
-        chunking -- e.g. a CAT_ALOG catalogue card -- are a SINGLE atomic
-        retrieval unit. Splitting them would fragment retrieval. So an oversized
-        doc is truncated from the HEAD, keeping the informative tail: for a
-        catalogue card that tail holds the "## Summary" section that CAT_ALOG
-        extracts. The document remains one point with intact metadata.
-
-        Returns:
-            A new list of documents, each at or under the embedder's budget.
-        """
-        max_tokens = getattr(embedder, "max_input_tokens", None)
-        if max_tokens is None or max_tokens <= 0:
-            return docs
-
-        sized: List[Document] = []
-        for doc in docs:
-            if self._doc_tokens(doc, embedder) <= max_tokens:
-                sized.append(doc)
-                continue
-
-            # chars per token, probed from the embedder's estimator
-            char_per_token = 3
-            if embedder is not None and hasattr(embedder, "_estimate_tokens"):
-                probe = "word " * 100
-                est = embedder._estimate_tokens(probe)
-                char_per_token = max(1, len(probe) / max(est, 1))
-            target_chars = max(1, int(max_tokens * char_per_token))
-
-            original = doc.page_content
-            tail = original
-            if len(original) > target_chars:
-                tail = original[-target_chars:]
-
-            source = doc.metadata.get("source") if isinstance(doc.metadata, dict) else None
-            log.warning(
-                f"STORE_TRUNCATED src={source} original_tokens="
-                f"{self._doc_tokens(doc, embedder)} max_input_tokens={max_tokens} "
-                f"kept_tail={len(tail)} chars (atomic unit, not split)"
-            )
-            sized.append(Document(page_content=tail, metadata=doc.metadata))
-        return sized
 
     def _merge_short_chunks(self, docs: List[Document], chunker: BaseChunker) -> List[Document]:
         """Safely merge short chunks with adjacent ones.
