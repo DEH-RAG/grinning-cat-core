@@ -6,11 +6,11 @@
 # Hardening applied:
 #   1. MULTI-STAGE: compilers & dev-headers (build-essential, libmagic-dev) live
 #      ONLY in the builder stage — they never appear in the final image layers.
-#   2. Base image pinned by digest for supply-chain integrity.
-#   3. Runs as an unprivileged user (uid 65532, DHI nonroot convention) — never root.
-#   4. PYTHONDONTWRITEBYTECODE=1 — no bytecode written at runtime.
-#   5. Explicit STOPSIGNAL + HEALTHCHECK.
-#   6. NLTK data moved to an explicit, owned path (/app/nltk_data).
+#   2. Runs as an unprivileged user (uid 65532, DHI nonroot convention) — never root.
+#   3. PYTHONDONTWRITEBYTECODE=1 — no bytecode written at runtime.
+#   4. Explicit STOPSIGNAL + HEALTHCHECK.
+#   5. NLTK data moved to an explicit, owned path (/app/nltk_data).
+#   6. Writable app dir: /app owned by nonroot (runtime writes .pod_id, data/, plugins).
 #
 # NOTE on the base image: both stages use the `-dev` DHI variant. The `3.13`
 # "runtime" variant is distroless (no /bin/sh, no apt) and therefore cannot host
@@ -94,6 +94,7 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
+        hostname \
         libmagic1 \
         poppler-utils \
         tesseract-ocr \
@@ -125,6 +126,11 @@ COPY --from=builder --chown=nonroot:nonroot /app /app
 COPY --chown=nonroot:nonroot ./cat ./cat
 COPY --chown=nonroot:nonroot ./migrations ./migrations
 COPY --chown=nonroot:nonroot ./LICENSE ./
+
+# WORKDIR /app created the directory as root; the COPY --chown above only owned
+# the copied CONTENTS. The app writes top-level files in /app at runtime
+# (.pod_id, .welcome, dormouse/, creates data/), so own /app itself too.
+RUN chown nonroot:nonroot /app
 
 # Drop privileges for the runtime process and everything it spawns.
 # `nonroot` (uid/gid 65532) is the pre-provisioned unprivileged user shipped by
