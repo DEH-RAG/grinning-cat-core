@@ -548,6 +548,11 @@ class RabbitHole:
                 sized.append(doc)
                 continue
             sub_chunks = self._split_to_budget(doc, embedder)
+            source = doc.metadata.get("source") if isinstance(doc.metadata, dict) else None
+            log.debug(
+                f"OVERSIZED_SPLIT src={source} estimated_tokens={token_count} "
+                f"max_input_tokens={max_tokens} split_into={len(sub_chunks)}"
+            )
             sized.extend(sub_chunks)
         return sized
 
