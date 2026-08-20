@@ -63,12 +63,12 @@ BUILD_PROXY ?= http://10.42.0.1:3142
 BUILD_NO_PROXY ?= localhost,127.0.0.1,::1,.intranet
 
 dhi: update-requirements
-	docker buildx build . -f Dockerfile:dhi -t grinning-cat-core:dhi \
+	docker buildx build . -f Dockerfile:dhi -t grinning-cat-core:dhi-full \
 		--build-arg HTTP_PROXY=$(BUILD_PROXY) \
 		--build-arg HTTPS_PROXY=$(BUILD_PROXY) \
 		--build-arg NO_PROXY=$(BUILD_NO_PROXY)
 dev: update-requirements
-	docker buildx build . -f Dockerfile:dhi -t grinning-cat-core:dev \
+	docker buildx build . -f Dockerfile:dhi -t grinning-cat-core:dev-full \
 		--build-arg HTTP_PROXY=$(BUILD_PROXY) \
 		--build-arg HTTPS_PROXY=$(BUILD_PROXY) \
 		--build-arg NO_PROXY=$(BUILD_NO_PROXY)
