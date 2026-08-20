@@ -578,57 +578,56 @@ class RabbitHole:
     def _split_to_budget(self, doc: Document, embedder) -> List[Document]:
         """Split one oversized document into budget-compliant sub-chunks.
 
-        Recursive word-based splitting around the token budget, carrying the
-        original metadata (source/payload) forward to every sub-chunk so nothing
-        stored in the vector DB is lost.
+        Word-based, linear split around the token budget, carrying the original
+        metadata (source/payload) forward to every sub-chunk so nothing stored
+        in the vector DB is lost.
 
-        The chars-per-token factor matches the embedder's own token estimator:
-        sub-chunks are sized so their *estimated* token count stays at or under
-        the budget, keeping the split consistent with the embedder that will
-        actually encode them.
+        Sub-chunks are sized by MEASURING candidates with the embedder's own
+        ``_estimate_tokens`` (real tokenizer when available); a coarse
+        estimate-then-refine pass keeps it linear even for very long documents.
         """
         max_tokens = getattr(embedder, "max_input_tokens", None)
         if max_tokens is None or max_tokens <= 0:
             return [doc]
 
-        # Infer the chars-per-token ratio from the embedder's own estimator by
-        # measuring it on a probe string. This keeps the split exactly consistent
-        # with the token counting the embedder will perform on the sub-chunks.
-        if embedder is not None and hasattr(embedder, "_estimate_tokens"):
-            probe = "word " * 100  # 500 chars
-            est = embedder._estimate_tokens(probe)
-            char_per_token = max(1, len(probe) / max(est, 1))
-        else:
-            char_per_token = 3
-        target_chars = max(1, int(max_tokens * char_per_token))
-
         words = doc.page_content.split()
         if not words:
             return [doc]
 
+        def doc_tokens(text: str) -> int:
+            if embedder is not None and hasattr(embedder, "_estimate_tokens"):
+                return max(1, embedder._estimate_tokens(text))
+            return max(1, len(text) // 3)
+
+        # avg tokens per word for THIS document (sampled on 200 words), used
+        # to guess chunk boundaries in the coarse pass
+        sample = words[:200]
+        sample_tokens = max(1, doc_tokens(" ".join(sample)))
+        approx_tpw = sample_tokens / max(1, len(sample))
+        per_chunk_words = max(1, int(max_tokens / approx_tpw))
+
         sub_docs: List[Document] = []
-        current: List[str] = []
-        current_chars = 0
-
-        for word in words:
-            word_len = len(word)
-            sep = 1 if current else 0
-            if current and current_chars + sep + word_len > target_chars:
-                sub_docs.append(Document(
-                    page_content=" ".join(current),
-                    metadata=doc.metadata,
-                ))
-                current = [word]
-                current_chars = word_len
+        start = 0
+        n = len(words)
+        while start < n:
+            part = words[start:start + per_chunk_words]
+            if doc_tokens(" ".join(part)) <= max_tokens:
+                take = len(part)
             else:
-                current.append(word)
-                current_chars += sep + word_len
-
-        if current:
+                # refine: binary-search the largest prefix within budget
+                lo, hi = 0, len(part)
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if doc_tokens(" ".join(part[:mid])) <= max_tokens:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                take = max(1, lo)  # pathological single word: still emit it
             sub_docs.append(Document(
-                page_content=" ".join(current),
+                page_content=" ".join(words[start:start + take]),
                 metadata=doc.metadata,
             ))
+            start += take
         return sub_docs
 
     def _merge_short_chunks(self, docs: List[Document], chunker: BaseChunker) -> List[Document]:
