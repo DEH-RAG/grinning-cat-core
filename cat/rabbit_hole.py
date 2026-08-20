@@ -399,6 +399,14 @@ class RabbitHole:
         # hook the docs before they are stored in the vector memory
         docs = await plugin_manager.execute_hook("before_rabbithole_stores_documents", docs, caller=self.stray or self.cat)
 
+        # Authoritative sizing guard, applied to the FINAL list right before
+        # embedding: hooks (e.g. CAT_ALOG appending a catalogue card) can inject
+        # documents AFTER _split_text ran, so re-check that every chunk to be
+        # stored satisfies the embedder's max_input_tokens. Pure fold: oversized
+        # chunks are split into in-place budget-compliant sub-chunks (metadata
+        # inherited), ordering preserved, and the embed loop below stays 1:1.
+        docs = self._split_oversized(docs, embedder)
+
         # hook the points before they are stored in the vector memory
         valid_documents = list(filter(lambda doc_: doc_.page_content.strip(), docs))
         storing_vectors = await asyncio.to_thread(
