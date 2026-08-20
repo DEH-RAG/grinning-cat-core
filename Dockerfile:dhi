@@ -68,8 +68,7 @@ RUN uv venv --seed .venv && \
 RUN spacy download it_core_news_lg && \
     spacy download en_core_web_lg && \
     spacy download en_core_web_sm && \
-    python -m nltk.downloader -d /app/nltk_data punkt && \
-    python -m nltk.downloader -d /app/nltk_data averaged_perceptron_tagger
+    python -m nltk.downloader -d /app/nltk_data punkt averaged_perceptron_tagger
 
 # Remove build-time caches
 RUN rm -rf /root/.cache /tmp/* /var/tmp/*
