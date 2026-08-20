@@ -573,17 +573,31 @@ class RabbitHole:
         Recursive word-based splitting around the token budget, carrying the
         original metadata (source/payload) forward to every sub-chunk so nothing
         stored in the vector DB is lost.
+
+        The chars-per-token factor matches the embedder's own token estimator:
+        sub-chunks are sized so their *estimated* token count stays at or under
+        the budget, keeping the split consistent with the embedder that will
+        actually encode them.
         """
         max_tokens = getattr(embedder, "max_input_tokens", None)
         if max_tokens is None or max_tokens <= 0:
             return [doc]
 
+        # Infer the chars-per-token ratio from the embedder's own estimator by
+        # measuring it on a probe string. This keeps the split exactly consistent
+        # with the token counting the embedder will perform on the sub-chunks.
+        if embedder is not None and hasattr(embedder, "_estimate_tokens"):
+            probe = "word " * 100  # 500 chars
+            est = embedder._estimate_tokens(probe)
+            char_per_token = max(1, len(probe) / max(est, 1))
+        else:
+            char_per_token = 3
+        target_chars = max(1, int(max_tokens * char_per_token))
+
         words = doc.page_content.split()
         if not words:
             return [doc]
 
-        # figure the max characters per sub-chunk from the token budget
-        target_chars = max(1, max_tokens * 3)
         sub_docs: List[Document] = []
         current: List[str] = []
         current_chars = 0
