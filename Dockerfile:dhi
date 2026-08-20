@@ -3,17 +3,21 @@
 # =============================================================================
 # Grinning Cat Core — Hardened image (Docker Hardened Images variant)
 #
-# Hardening applied in this file:
-#   1. MULTI-STAGE: compilers & dev-tooling (gcc/make/libc6-dev/build-essential)
-#      live ONLY in the builder stage. The runtime image contains none of them
-#      in ANY layer (vs. the old purge approach, where they remained recoverable
-#      from intermediate layers and bloated the image).
-#   2. Base images pinned by digest for supply-chain integrity.
-#   3. Runs as an unprivileged user (uid 10001) — never as root.
+# Hardening applied:
+#   1. MULTI-STAGE: compilers & dev-headers (build-essential, libmagic-dev) live
+#      ONLY in the builder stage — they never appear in the final image layers.
+#   2. Base image pinned by digest for supply-chain integrity.
+#   3. Runs as an unprivileged user (uid 65532, DHI nonroot convention) — never root.
 #   4. PYTHONDONTWRITEBYTECODE=1 — no bytecode written at runtime.
 #   5. Explicit STOPSIGNAL + HEALTHCHECK.
-#   6. NLTK data moved to an explicit, owned path so it survives the non-root
-#      switch (the old default ~/nltk_data would have landed in /root).
+#   6. NLTK data moved to an explicit, owned path (/app/nltk_data).
+#
+# NOTE on the base image: both stages use the `-dev` DHI variant. The `3.13`
+# "runtime" variant is distroless (no /bin/sh, no apt) and therefore cannot host
+# the heavy runtime system deps (libreoffice, ffmpeg, pandoc, ...) nor run the
+# apt-get used to install them. The `-dev` variant does NOT preinstall compilers
+# (gcc/make are absent by default), so confining `build-essential` to the builder
+# stage still keeps the toolchain out of the final image.
 # =============================================================================
 
 # Build-time proxy only — consumed during image construction, never baked in.
@@ -24,8 +28,6 @@ ARG NO_PROXY
 # ---------------------------------------------------------------------------
 # Stage 1 — BUILDER
 # ---------------------------------------------------------------------------
-# `-dev` variant on purpose: it ships the compilers/headers required to build
-# native extensions (pydantic-core, spaCy, numpy, python-magic, ...).
 FROM dhi.io/python:3.13-dev@sha256:81978c0c24990a7a88a061625697df4078afa92d9967ec42fae7d2e9a078371f AS builder
 
 ENV PYTHONUNBUFFERED=1 \
@@ -33,7 +35,8 @@ ENV PYTHONUNBUFFERED=1 \
     UV_LINK_MODE=copy \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
-    VIRTUAL_ENV=/app/.venv
+    VIRTUAL_ENV=/app/.venv \
+    DEBIAN_FRONTEND=noninteractive
 
 # uv — fast deterministic installs (copied again into the runtime stage)
 COPY --from=dhi.io/uv:0 /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
@@ -72,8 +75,7 @@ RUN rm -rf /root/.cache /tmp/* /var/tmp/*
 # ---------------------------------------------------------------------------
 # Stage 2 — RUNTIME (final)
 # ---------------------------------------------------------------------------
-# Non-dev image: no compilers, no dev headers, no build toolchain.
-FROM dhi.io/python:3.13@sha256:e512071462b6f002ac3d6f4d31bdf7d20fe6ffce3b5ce4f684b5e50d14dba217 AS final
+FROM dhi.io/python:3.13-dev@sha256:81978c0c24990a7a88a061625697df4078afa92d9967ec42fae7d2e9a078371f AS final
 
 ENV PYTHONUNBUFFERED=1 \
     UV_NO_CACHE=1 \
@@ -82,11 +84,10 @@ ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH" \
     VIRTUAL_ENV=/app/.venv \
     NLTK_DATA=/app/nltk_data \
-    PORT=80
+    PORT=80 \
+    DEBIAN_FRONTEND=noninteractive
 
 # Runtime-only system dependencies (no compilers, no dev headers).
-# Note: `libreoffice*nogui` / `tesseract-ocr-{ita,eng}` kept verbatim from the
-# previous single-stage image to preserve behavior.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
@@ -112,24 +113,21 @@ RUN apt-get update && \
 # uv runtime binary — needed for on-demand plugin dependency installs
 COPY --from=dhi.io/uv:0 /usr/local/bin/uv /usr/local/bin/uvx /usr/local/bin/
 
-# Unprivileged runtime user
-RUN groupadd --gid 10001 cat \
-    && useradd --uid 10001 --gid cat --create-home --shell /usr/sbin/nologin cat
-
 WORKDIR /app
 
 # Application, virtualenv, spaCy models and NLTK data — owned by the runtime user
-COPY --from=builder --chown=cat:cat /app /app
+COPY --from=builder --chown=nonroot:nonroot /app /app
 
-# Fresh source + migrations + license + entrypoint
-COPY --chown=cat:cat ./cat ./cat
-COPY --chown=cat:cat ./migrations ./migrations
-COPY --chown=cat:cat ./LICENSE ./
-COPY --chown=cat:cat ./docker/entrypoint.sh ./docker/entrypoint.sh
-RUN chmod +x ./docker/entrypoint.sh
+# Fresh source + migrations + license
+COPY --chown=nonroot:nonroot ./cat ./cat
+COPY --chown=nonroot:nonroot ./migrations ./migrations
+COPY --chown=nonroot:nonroot ./LICENSE ./
 
-# Drop privileges for the runtime process and everything it spawns
-USER cat
+# Drop privileges for the runtime process and everything it spawns.
+# `nonroot` (uid/gid 65532) is the pre-provisioned unprivileged user shipped by
+# the DHI base images; its writable home is /home/nonroot.
+USER nonroot
+ENV HOME=/home/nonroot
 
 EXPOSE 80
 
@@ -138,5 +136,4 @@ STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \
     CMD ["python", "-c", "import urllib.request, sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:80/health/liveness', timeout=3).status == 200 else 1)"]
 
-ENTRYPOINT ["./docker/entrypoint.sh"]
 CMD ["python", "-m", "cat.main"]
