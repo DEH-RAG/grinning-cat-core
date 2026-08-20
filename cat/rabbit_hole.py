@@ -501,11 +501,108 @@ class RabbitHole:
 
         # join each short chunk with previous one, instead of deleting them
         try:
-            return self._merge_short_chunks(docs, self.cat.chunker)
+            docs = self._merge_short_chunks(docs, self.cat.chunker)
         except Exception as e:
             # Log error but don't fail the entire process
             log.warning(f"Error merging short chunks: {e}. Proceeding with original chunks.")
+
+        # Finalize the document list so no chunk exceeds the active embedder's
+        # max_input_tokens. This is a build-phase step, fully separate from the
+        # embedding loop in store_documents: it produces the correct final list
+        # (splitting oversized chunks into in-place sub-chunks) so the later
+        # 1:1 embed/store pairing is never broken by re-chunking mid-loop.
+        try:
+            embedder = await self.cat.lizard.embedder()
+            docs = self._split_oversized(docs, embedder)
+        except Exception as e:
+            # Log error but don't fail the entire process
+            log.warning(f"Failed to finalize oversized chunks: {e}. Proceeding with original chunks.")
+
+        return docs
+
+    def _split_oversized(self, docs: List[Document], embedder) -> List[Document]:
+        """Finalize a document list so no chunk exceeds the embedder's input limit.
+
+        This is a *pure fold* over ``docs``: it reads the input list and returns a
+        brand-new list, never mutating ``docs`` while scanning it. Any oversized
+        chunk is split into budget-compliant sub-chunks that replace it at its own
+        index, so the relative order of all chunks is preserved and each sub-chunk
+        becomes its own stored point (with its own payload) in the vector database.
+
+        Args:
+            docs: The chunked documents produced by the configured chunker.
+            embedder: The active embedder, whose ``max_input_tokens`` ceiling is
+                enforced. ``None`` or a missing limit disables the split.
+
+        Returns:
+            A new list of documents where every chunk is at or under the limit.
+        """
+        max_tokens = getattr(embedder, "max_input_tokens", None)
+        if max_tokens is None or max_tokens <= 0:
             return docs
+
+        sized: List[Document] = []
+        for doc in docs:
+            token_count = self._doc_tokens(doc, embedder)
+            if token_count <= max_tokens:
+                sized.append(doc)
+                continue
+            sub_chunks = self._split_to_budget(doc, embedder)
+            sized.extend(sub_chunks)
+        return sized
+
+    def _doc_tokens(self, doc: Document, embedder) -> int:
+        """Conservative token count for a document chunk.
+
+        Prefers the active embedder's own ``_estimate_tokens`` when available so
+        the count matches the model that will embed the chunk; otherwise falls
+        back to a ~3 chars/token heuristic (never an undercount).
+        """
+        if embedder is not None and hasattr(embedder, "_estimate_tokens"):
+            return embedder._estimate_tokens(doc.page_content)
+        return max(1, len(doc.page_content) // 3)
+
+    def _split_to_budget(self, doc: Document, embedder) -> List[Document]:
+        """Split one oversized document into budget-compliant sub-chunks.
+
+        Recursive word-based splitting around the token budget, carrying the
+        original metadata (source/payload) forward to every sub-chunk so nothing
+        stored in the vector DB is lost.
+        """
+        max_tokens = getattr(embedder, "max_input_tokens", None)
+        if max_tokens is None or max_tokens <= 0:
+            return [doc]
+
+        words = doc.page_content.split()
+        if not words:
+            return [doc]
+
+        # figure the max characters per sub-chunk from the token budget
+        target_chars = max(1, max_tokens * 3)
+        sub_docs: List[Document] = []
+        current: List[str] = []
+        current_chars = 0
+
+        for word in words:
+            word_len = len(word)
+            sep = 1 if current else 0
+            if current and current_chars + sep + word_len > target_chars:
+                sub_docs.append(Document(
+                    page_content=" ".join(current),
+                    metadata=doc.metadata,
+                ))
+                current = [word]
+                current_chars = word_len
+            else:
+                current.append(word)
+                current_chars += sep + word_len
+
+        if current:
+            sub_docs.append(Document(
+                page_content=" ".join(current),
+                metadata=doc.metadata,
+            ))
+        return sub_docs
 
     def _merge_short_chunks(self, docs: List[Document], chunker: BaseChunker) -> List[Document]:
         """Safely merge short chunks with adjacent ones.
