@@ -87,9 +87,9 @@ beautifulsoup4==4.15.0
     #   unstructured
 blis==1.3.3
     # via thinc
-boto3==1.43.75
+boto3==1.43.77
     # via grinning-cat (pyproject.toml)
-botocore==1.43.75
+botocore==1.43.77
     # via
     #   boto3
     #   s3transfer
@@ -173,7 +173,7 @@ cuda-toolkit==13.0.3.0
     # via torch
 cycler==0.12.1
     # via matplotlib
-cyclopts==4.23.0
+cyclopts==4.23.1
     # via fastmcp-slim
 cymem==2.0.13
     # via
@@ -492,7 +492,7 @@ langchain-core==1.6.0
     #   langgraph-sdk
 langchain-experimental==0.4.2
     # via grinning-cat (pyproject.toml)
-langchain-google-genai==4.3.4
+langchain-google-genai==4.3.5
     # via grinning-cat (pyproject.toml)
 langchain-groq==1.1.3
     # via grinning-cat (pyproject.toml)
@@ -590,7 +590,7 @@ murmurhash==1.0.15
     #   thinc
 mysql-connector-python==26.7.0
     # via grinning-cat (pyproject.toml)
-narwhals==2.24.0
+narwhals==2.25.0
     # via scikit-learn
 neo4j==6.2.0
     # via grinning-cat (pyproject.toml)
@@ -1043,7 +1043,7 @@ rpds-py==2026.6.3
     #   referencing
 rtree==1.4.1
     # via alphashape
-ruff==0.16.3
+ruff==0.16.4
     # via grinning-cat (pyproject.toml)
 s3transfer==0.19.2
     # via boto3

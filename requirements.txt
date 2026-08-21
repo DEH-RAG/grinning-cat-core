@@ -63,7 +63,7 @@ cryptography==50.0.0
     #   joserfc
     #   pyjwt
     #   secretstorage
-cyclopts==4.23.0
+cyclopts==4.23.1
     # via fastmcp-slim
 dill==0.4.1
     # via pylint
@@ -205,16 +205,16 @@ langgraph-checkpoint==4.2.0
     #   langgraph-prebuilt
 langgraph-prebuilt==1.1.0
     # via langgraph
-langgraph-sdk==0.4.2
+langgraph-sdk==0.4.3
     # via langgraph
-langsmith==0.11.0
+langsmith==0.11.1
     # via
     #   langchain-classic
     #   langchain-community
     #   langchain-core
 loguru==0.7.3
     # via grinning-cat (pyproject.toml)
-lxml==6.1.1
+lxml==6.1.2
     # via grinning-cat (pyproject.toml)
 markdown-it-py==4.2.0
     # via rich
@@ -232,7 +232,7 @@ multidict==6.7.1
     # via
     #   aiohttp
     #   yarl
-narwhals==2.24.0
+narwhals==2.25.0
     # via scikit-learn
 numpy==2.5.2
     # via
@@ -277,7 +277,7 @@ propcache==0.5.2
     # via
     #   aiohttp
     #   yarl
-protobuf==7.35.1
+protobuf==7.36.0
     # via qdrant-client
 py-key-value-aio==0.4.5
     # via fastmcp-slim
@@ -389,7 +389,7 @@ rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
-ruff==0.16.3
+ruff==0.16.4
     # via grinning-cat (pyproject.toml)
 scalar-fastapi==1.8.2
     # via grinning-cat (pyproject.toml)
@@ -466,7 +466,7 @@ uuid-utils==0.17.0
     # via
     #   langchain-core
     #   langsmith
-uvicorn==0.52.3
+uvicorn==0.52.4
     # via
     #   grinning-cat (pyproject.toml)
     #   fastmcp-slim
@@ -477,7 +477,7 @@ watchfiles==1.2.0
     # via
     #   fastmcp-slim
     #   uvicorn
-websockets==15.0.1
+websockets==16.1.1
     # via
     #   grinning-cat (pyproject.toml)
     #   fastmcp-slim
