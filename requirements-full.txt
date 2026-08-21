@@ -256,7 +256,7 @@ google-api-core==2.34.0
     #   google-cloud-core
     #   google-cloud-storage
     #   google-cloud-vision
-google-api-python-client==2.198.0
+google-api-python-client==2.199.0
     # via
     #   grinning-cat (pyproject.toml)
     #   google-api-python-client-stubs

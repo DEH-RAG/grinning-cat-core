@@ -76,5 +76,8 @@ update-requirements:
 	git pull
 	docker pull dhi.io/python:3.13-dev
 	uv lock --upgrade --python 3.13
-	uv pip compile --python-version 3.13 --extra plugins -o requirements-full.txt pyproject.toml
+	# NOTE: --upgrade is required for `uv pip compile`, otherwise it treats the
+	# existing output file's pins as preferences and never tracks the new lock.
+	uv pip compile --upgrade --python-version 3.13 --extra plugins -o requirements-full.txt pyproject.toml
+	uv pip compile --upgrade -o requirements.txt pyproject.toml
 
