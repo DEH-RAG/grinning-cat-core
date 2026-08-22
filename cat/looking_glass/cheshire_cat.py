@@ -170,6 +170,21 @@ class CheshireCat(BotMixin, NonCopyableMixin):
             embedder.embed_documents, [document.page_content for document in documents]
         )
 
+        # Guard: the embedder must produce vectors whose dimension matches the one used to
+        # (re)create the vector collections (embedder.size from embed_query). A silent factory
+        # fallback to a different embedder (e.g. DumbEmbedder) emits a different dimension and
+        # Qdrant rejects it with an opaque "Vector dimension error" — failing loudly here makes
+        # the real cause obvious instead of surfacing as an unhelpful Qdrant upsert error.
+        expected_dim = embedder.size
+        wrong_dims = {len(v) for v in vectors if len(v) != expected_dim}
+        if wrong_dims:
+            raise ValueError(
+                f"Embedder `{embedder.name}` produced vectors of dimension {sorted(wrong_dims)} "
+                f"but collection `{str(VectorMemoryType.PROCEDURAL)}` expects {expected_dim}. "
+                f"This usually means the configured embedder failed to instantiate and the factory "
+                f"silently fell back to a different one. Check the ServiceFactory logs for the real error."
+            )
+
         points = [
             PointStruct(
                 id=uuid.uuid4().hex,
