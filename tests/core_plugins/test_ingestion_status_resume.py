@@ -251,3 +251,116 @@ async def test_after_lizard_bootstrap_schedules_pass(monkeypatch):
     assert len(scheduled) == 1
     # await the scheduled coroutine so it is not left dangling
     await scheduled[0]
+
+
+async def test_resume_retries_stale_error_with_file_present(cheshire_cat, monkeypatch):
+    """An error entry with the file still on disk is re-ingested when stale."""
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "errored.pdf"), {
+        "source": "errored.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": "error",
+        "error": "parse failed",
+        "error_at": old,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda source, remote: b"content")
+
+    calls = []
+
+    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
+        calls.append((cat, file, filename))
+        await ingestion_plugin.after_rabbithole_stored_documents.function(filename, [object()], cat)
+
+    monkeypatch.setattr(lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+
+    await resume._resume_agent(lizard, agent_key)
+
+    assert len(calls) == 1
+    assert calls[0][2] == "errored.pdf"
+    doc = await get_status(agent_key, "agent", "errored.pdf")
+    assert doc["status"] == "completed"
+
+
+async def test_resume_skips_error_with_file_missing(cheshire_cat, monkeypatch):
+    """An error entry whose file is gone is NOT re-ingested (nothing to read);
+    the teacher must re-upload."""
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "lost.pdf"), {
+        "source": "lost.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": "error",
+        "error": "boom",
+        "error_at": old,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda source, remote: None)
+
+    calls = []
+
+    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
+        calls.append(filename)
+
+    monkeypatch.setattr(lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+
+    await resume._resume_agent(lizard, agent_key)
+
+    assert calls == []
+    doc = await get_status(agent_key, "agent", "lost.pdf")
+    assert doc["status"] == "error"
+
+
+async def test_fresh_processing_claimed_by_other_worker_not_double_ingested(cheshire_cat, monkeypatch):
+    """Two workers seeing the same fresh processing entry: only the one that
+    wins the per-source claim proceeds — the other sees the row claimed
+    (owner set + updated_at bumped) and skips."""
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "same.pdf"), {
+        "source": "same.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": "processing",
+        "error": None,
+        "error_at": None,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda source, remote: b"content")
+
+    calls = []
+
+    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
+        calls.append(filename)
+        await ingestion_plugin.after_rabbithole_stored_documents.function(filename, [object()], cat)
+
+    monkeypatch.setattr(lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+
+    # Worker 1 wins the claim, Worker 2 runs right after (row now fresh+claimed)
+    await resume._resume_agent(lizard, agent_key)
+    await resume._resume_agent(lizard, agent_key)
+
+    assert len(calls) == 1
+    doc = await get_status(agent_key, "agent", "same.pdf")
+    assert doc["status"] == "completed"

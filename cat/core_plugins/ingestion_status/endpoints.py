@@ -18,7 +18,11 @@ from cat import (
     check_permissions,
     endpoint,
 )
-from cat.core_plugins.ingestion_status.registry import delete_status, list_statuses
+from cat.core_plugins.ingestion_status.registry import (
+    delete_status,
+    get_status,
+    list_statuses,
+)
 from cat.db.cruds import conversations as crud_conversations
 from cat.log import log
 from cat.services.memory.models import VectorMemoryType
@@ -61,13 +65,17 @@ async def _reconcile(ccat, agent_id: str, chat_id: Optional[str], statuses: List
     Returns the reconciled (post-purge) list. Purge failures are logged and
     never propagated to the caller.
 
-    ERROR carve-out: entries whose ``status`` is ``"error"`` are never purged
-    by this canonical-source reconcile. A failed upload never lands in the file
-    manager / vector store, so it would otherwise be purged on first read and
-    the error badge could never be shown. Error entries remain observable via
-    the API (including chat-scoped errors whose conversation is gone — the
-    error is still meaningful). They are only removed by whole-scope wipes
-    (``clear_agent`` / ``clear_chat`` / destroy).
+    Carve-outs — never purged by this canonical-source reconcile:
+    - in-flight entries (uploaded/downloading/downloaded/processing): they are
+      legitimately not yet in the file manager / web points, so purging them
+      on first read would hide the processing queue from the dashboard;
+    - error entries: a failed upload never lands in the canonical lists, so an
+      error would otherwise vanish immediately; the teacher dismisses it via
+      DELETE /ingestion/status or re-uploads.
+
+    Only terminal COMPLETED entries whose source has genuinely vanished (file
+    removed, URL with no web points, conversation gone) are purged here; they
+    are also removed explicitly when the file is deleted.
     """
     scope = chat_id or "agent"
 
@@ -97,8 +105,34 @@ async def _reconcile(ccat, agent_id: str, chat_id: Optional[str], statuses: List
             kept.append(doc)
             continue
 
-        # ERROR carve-out: never purge error entries via the canonical reconcile
-        if doc.get("status") == "error":
+# Never purge in-flight or failed entries: a source that is still being
+    # ingested (uploaded/downloading/downloaded/processing) is legitimately not
+    # (yet) in the canonical lists — the file manager / web points populate as
+    # the pipeline advances — so purging on first read would hide the queue
+    # from the dashboard across sessions. Errors must stay visible until the
+    # teacher dismisses them (DELETE /ingestion/status) or re-uploads.
+    # Only terminal COMPLETED entries whose source has genuinely vanished
+    # (file deleted / URL gone / conversation gone) are purged.
+    never_purge = {
+        "uploaded",
+        "downloading",
+        "downloaded",
+        "processing",
+        "error",
+    }
+
+    kept: List[Dict] = []
+    for doc in statuses:
+        source = doc.get("source")
+        if not source:
+            # cannot reconcile without a source: keep it
+            kept.append(doc)
+            continue
+
+        status = doc.get("status")
+
+        # in-flight / error carve-out: never purge via the canonical reconcile
+        if status in never_purge:
             kept.append(doc)
             continue
 
@@ -150,3 +184,42 @@ async def get_ingestion_status(
         return statuses
 
     return await _reconcile(info.cheshire_cat, agent_id, chat_id, statuses)
+
+
+@endpoint.delete("/status", prefix="/ingestion", tags=["Ingestion"])
+async def delete_ingestion_status(
+    source: str = Query(..., description="The file name or URL whose status row to delete."),
+    scope: Optional[str] = Query(
+        default=None,
+        description='Scope of the entry: "agent" (default) or a conversation chat_id.',
+    ),
+    info: AuthorizedInfo = check_permissions(AuthResource.MEMORY, AuthPermission.DELETE),
+) -> Dict:
+    """Delete the ingestion-status row for one source.
+
+    Only terminal statuses (error, completed) may be deleted here. A source
+    that is still being ingested (uploaded/downloading/downloaded/processing)
+    MUST NOT be deleted this way — the running pipeline would keep going and a
+    ``completed`` row would be re-created by the lifecycle hooks, orphaning
+    the work. To abandon an in-flight source, remove the file instead (that
+    deletes the file, its memory points, and the status row together).
+    """
+    agent_id = info.agent_id
+    if agent_id is None:
+        return {"deleted": False, "reason": "no_agent"}
+
+    scope = scope or "agent"
+    doc = await get_status(agent_id, scope, source)
+    if doc is None:
+        return {"deleted": False, "reason": "not_found"}
+
+    status = doc.get("status")
+    if status in ("uploaded", "downloading", "downloaded", "processing"):
+        return {
+            "deleted": False,
+            "reason": "in_flight",
+            "message": "source is being processed; remove the file to abandon it",
+        }
+
+    await delete_status(agent_id, scope, source)
+    return {"deleted": True}

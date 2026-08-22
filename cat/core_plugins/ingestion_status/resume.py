@@ -14,12 +14,15 @@ Both are guarded by a distributed lock and never crash lizard bootstrap.
 """
 import asyncio
 import os
-import time
 from io import BytesIO
 from typing import Any, Dict, List
 
 from cat import BillTheLizard, hook, log
-from cat.core_plugins.ingestion_status.registry import IngestionStatus, list_statuses
+from cat.core_plugins.ingestion_status.registry import (
+    IngestionStatus,
+    claim_source_for_resume,
+    list_statuses,
+)
 from cat.core_plugins.ingestion_status.reconcile import reconcile_agent
 from cat.db import crud
 from cat.db.cruds import settings as crud_settings
@@ -45,23 +48,16 @@ def _stale_seconds() -> int:
     return value if value is not None and value > 0 else 300
 
 
-def _is_stale(entry: Dict, stale_seconds: int) -> bool:
-    """True when an entry's ``updated_at`` is older than the threshold."""
-    updated_at = entry.get("updated_at")
-    if updated_at is None:
-        return True
-    try:
-        return (time.time() - float(updated_at)) > stale_seconds
-    except (TypeError, ValueError):
-        return True
-
-
 async def _resume_agent(lizard: BillTheLizard, agent_id: str, ccat: Any = None) -> None:
     """Re-trigger stale ingestions for one agent.
 
-    Only entries in ``uploaded``/``processing`` older than the stale threshold
-    are re-ingested; fresh entries and ``completed``/``error`` entries are left
-    untouched.
+    Only entries in ``uploaded``/``processing``/``error`` older than the stale
+    threshold are candidates. Each candidate is claimed atomically under a
+    per-source lock (so two workers never re-ingest the SAME source, while
+    different sources of the same agent proceed concurrently) and only
+    re-ingested if its source is still present (file bytes on disk, or a URL
+    that is still a valid http source). Fresh entries and ``completed``
+    entries are left untouched.
     """
     if ccat is None:
         ccat = await lizard.get_cheshire_cat(agent_id)
@@ -72,15 +68,50 @@ async def _resume_agent(lizard: BillTheLizard, agent_id: str, ccat: Any = None) 
     entries = await list_statuses(agent_id)
     for entry in entries:
         status = entry.get("status")
-        if status not in (IngestionStatus.UPLOADED.value, IngestionStatus.PROCESSING.value):
-            continue
-        if not _is_stale(entry, stale_seconds):
+        if status not in (
+            IngestionStatus.UPLOADED.value,
+            IngestionStatus.PROCESSING.value,
+            IngestionStatus.ERROR.value,
+        ):
             continue
 
         source = entry.get("source")
         scope = entry.get("scope")
         type_ = entry.get("type")
         if not source:
+            continue
+
+        # Only re-ingest sources that are still present (a file that never
+        # landed on disk, or a URL that no longer resolves, cannot be
+        # re-processed — the teacher must re-upload/re-add instead).
+        if type_ == "url" or is_url(source):
+            # URLs are re-downloaded by ingest_file; nothing to pre-check on
+            # CAT storage, but the source must still look like a URL.
+            pass
+        else:
+            path = agent_id
+            if scope != "agent":
+                path = os.path.join(path, str(scope))
+            try:
+                if ccat.file_manager.read_file(source, path) is None:
+                    log.warning(
+                        f"Ingestion resume: file {source} missing for agent {agent_id}; skipping"
+                    )
+                    continue
+            except Exception as e:
+                log.warning(f"Ingestion resume: cannot check file {source} for {agent_id}: {e}")
+                continue
+
+        # Atomic per-source claim: <agent>:<scope>:<source>. Only the worker
+        # that wins the claim (and only if the entry is stale — not actively
+        # being handled by another worker) proceeds with the re-ingestion.
+        owner = f"{os.getpid()}"
+        claimed = await claim_source_for_resume(
+            agent_id, str(scope), source,
+            stale_after=stale_seconds, owner=owner,
+        )
+        if claimed is None:
+            # another worker is handling it, or it is still fresh
             continue
 
         cat = ccat
@@ -115,9 +146,16 @@ async def _resume_agent(lizard: BillTheLizard, agent_id: str, ccat: Any = None) 
 
 
 async def _pass_for_agent(lizard: BillTheLizard, agent_id: str) -> None:
-    """Run the resume + GC pass for one agent under a distributed lock."""
+    """Run the resume + GC pass for one agent.
+
+    Only the enumeration is guarded by a short agent-level distributed lock;
+    actual (re)ingestion of each candidate happens under its own
+    per-source lock (see ``claim_source_for_resume``), so different sources
+    of the same agent are processed concurrently while the same source can
+    never be double-processed by another worker.
+    """
     try:
-        async with crud.distributed_lock(f"reingest:{agent_id}"):
+        async with crud.distributed_lock(f"ingestion-sweep:{agent_id}", timeout=30, blocking_timeout=5):
             ccat = await lizard.get_cheshire_cat(agent_id)
             if ccat is None:
                 return

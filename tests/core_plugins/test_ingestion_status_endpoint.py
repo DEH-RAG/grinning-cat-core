@@ -10,6 +10,7 @@ The endpoint builds a *fresh* ``CheshireCat`` per request (via
 root (``tests/data/storage``) rather than through the fixture's cat.
 """
 import os
+import urllib.parse
 
 from cat.core_plugins.base_plugin.file_managers.custom import LocalFileManager
 from cat.core_plugins.ingestion_status.registry import (
@@ -190,3 +191,68 @@ async def test_forbidden_without_memory_read(secure_client, secure_client_header
     )
     assert response.status_code == 403
     assert response.json()["detail"] == "Forbidden"
+
+
+async def test_inflight_status_survives_when_source_absent(
+    secure_client, secure_client_headers, cheshire_cat, monkeypatch
+):
+    """N2: in-flight entries (uploaded/downloading/downloaded/processing) are
+    NEVER purged by the read-time reconcile, even when the source is not (yet)
+    in the canonical lists — the processing queue must stay visible across
+    sessions/workers. Only completed (vanished) and error (kept) are special.
+    """
+    _use_local_file_manager(monkeypatch)
+    for status in ("uploaded", "downloading", "downloaded", "processing"):
+        await set_status(agent_id, "agent", f"inflight_{status}.pdf", type_="file", status=status)
+
+    response = await secure_client.get("/ingestion/status", headers=secure_client_headers)
+    assert response.status_code == 200
+    sources = {e["source"] for e in response.json()}
+    assert sources == {
+        "inflight_uploaded.pdf",
+        "inflight_downloading.pdf",
+        "inflight_downloaded.pdf",
+        "inflight_processing.pdf",
+    }
+
+
+async def test_delete_status_error_survives(secure_client, secure_client_headers, cheshire_cat, monkeypatch):
+    """DELETE /ingestion/status removes an error row (dismissal)."""
+    _use_local_file_manager(monkeypatch)
+    await set_status(agent_id, "agent", "failed.pdf", type_="file", status=IngestionStatus.ERROR, error="boom")
+
+    response = await secure_client.delete(
+        f"/ingestion/status?source={urllib.parse.quote('failed.pdf')}",
+        headers=secure_client_headers,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"deleted": True}
+    assert await get_status(agent_id, "agent", "failed.pdf") is None
+
+
+async def test_delete_inflight_status_refused(secure_client, secure_client_headers, cheshire_cat, monkeypatch):
+    """DELETE /ingestion/status refuses in-flight sources: deleting the row
+    while work is running would orphan the pipeline (the hooks re-create a
+    completed row) — the teacher must remove the file instead.
+    """
+    _use_local_file_manager(monkeypatch)
+    await set_status(agent_id, "agent", "busy.pdf", type_="file", status=IngestionStatus.PROCESSING)
+
+    response = await secure_client.delete(
+        f"/ingestion/status?source={urllib.parse.quote('busy.pdf')}",
+        headers=secure_client_headers,
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["deleted"] is False
+    assert body["reason"] == "in_flight"
+    assert await get_status(agent_id, "agent", "busy.pdf") is not None
+
+
+async def test_delete_status_not_found(secure_client, secure_client_headers, cheshire_cat):
+    response = await secure_client.delete(
+        f"/ingestion/status?source={urllib.parse.quote('nope.pdf')}",
+        headers=secure_client_headers,
+    )
+    assert response.status_code == 200
+    assert response.json() == {"deleted": False, "reason": "not_found"}

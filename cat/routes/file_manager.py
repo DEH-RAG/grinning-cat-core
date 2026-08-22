@@ -7,7 +7,9 @@ from starlette.responses import StreamingResponse
 
 from cat.auth.connection import AuthorizedInfo
 from cat.auth.permissions import AuthResource, AuthPermission, check_permissions
+from cat.core_plugins.ingestion_status.registry import delete_status as delete_ingestion_status
 from cat.exceptions import CustomNotFoundException, CustomValidationException
+from cat.log import log
 from cat.routes.routes_utils import (
     GetSettingsResponse,
     GetSettingResponse,
@@ -166,6 +168,18 @@ async def delete_file(
         # delete points
         await info.cheshire_cat.vector_memory_handler.delete_tenant_points(str(collection_id), metadata)  # type: ignore[arg-type]
 
+        # the file is gone: drop its ingestion-status row too, so a stale
+        # "processing"/"completed" row cannot linger and confuse the dashboard
+        chat_or_agent = path.split(os.sep, 1)[1] if os.sep in path else "agent"
+        try:
+            await delete_ingestion_status(
+                info.agent_id,
+                str(chat_or_agent),
+                sanitized_source,
+            )
+        except Exception as e:
+            log.warning(f"Ingestion status cleanup on delete_file failed for {source_name}: {e}")
+
         return FileManagerDeletedFiles(deleted=res)
     except Exception as e:
         raise CustomValidationException(f"Failed to delete memory points: {e}")
@@ -212,6 +226,12 @@ async def delete_files(
         for file in files:
             metadata |= {"source": file.name}
             await info.cheshire_cat.vector_memory_handler.delete_tenant_points(str(collection_id), metadata)  # type: ignore[arg-type]
+            # drop the ingestion-status row for each removed file
+            chat_or_agent = path.split(os.sep, 1)[1] if os.sep in path else "agent"
+            try:
+                await delete_ingestion_status(info.agent_id, str(chat_or_agent), file.name)
+            except Exception as e:
+                log.warning(f"Ingestion status cleanup on delete_files failed for {file.name}: {e}")
 
         return FileManagerDeletedFiles(deleted=res)
     except Exception as e:

@@ -64,6 +64,7 @@ async def set_status(
     status: IngestionStatus,
     chat_id: Optional[str] = None,
     error: Optional[str] = None,
+    extra: Optional[Dict] = None,
 ) -> Dict:
     """Write (or update) the ingestion-status doc for a source.
 
@@ -78,6 +79,7 @@ async def set_status(
         status: The new lifecycle state.
         chat_id: The conversation id, when the ingestion is chat-scoped.
         error: The error message, when ``status`` is ERROR.
+        extra: Optional extra fields merged into the stored doc.
 
     Returns:
         The stored status document.
@@ -99,6 +101,8 @@ async def set_status(
         "created_at": created_at,
         "updated_at": now,
     }
+    if extra:
+        doc.update(extra)
     await crud.store(key, doc)
     return doc
 
@@ -106,6 +110,96 @@ async def set_status(
 async def get_status(agent_id: str, scope: str, source: str) -> Optional[Dict]:
     """Read the ingestion-status doc for a source, or None if absent."""
     return await _read_doc(status_key(agent_id, scope, source))
+
+
+async def claim_source_for_resume(
+    agent_id: str,
+    scope: str,
+    source: str,
+    *,
+    stale_after: float,
+    owner: str,
+) -> Optional[Dict]:
+    """Atomically claim a source for (re)ingestion under a per-source lock.
+
+    Lock granularity is ``<agent>:<scope>:<sha256(source)>``, so many sources
+    of the same agent can be (re)ingested concurrently by different workers,
+    while two workers can never claim the SAME source at the same time.
+
+    A source is claimable only when its current status allows a (re)start and
+    its last update is older than ``stale_after`` (seconds): a fresh
+    ``uploaded``/``processing`` row means another worker is already handling
+    it, so this call returns None instead of double-ingesting.
+
+    On success the row is reset to PROCESSING with ``resume_owner`` /
+    ``resume_at`` / bumped ``updated_at`` so other workers see it as taken.
+
+    Args:
+        agent_id: The agent (chatbot) id.
+        scope: ``"agent"`` or a conversation ``chat_id``.
+        source: The ingested file name or URL.
+        stale_after: Minimum age of ``updated_at`` (seconds) for the entry to
+            be claimable — protects in-flight work from being double-processed.
+        owner: Identifier of the claiming worker (e.g. ``pid``).
+
+    Returns:
+        The claimed (updated) status doc, or None when not claimable.
+    """
+    import time
+
+    key = status_key(agent_id, scope, source)
+    lock_pattern = f"ingestion-resume:{agent_id}:{scope}:{source}"
+    async with crud.distributed_lock(lock_pattern, timeout=30, blocking_timeout=15):
+        doc = await _read_doc(key)
+        if doc is None:
+            return None
+
+        status = doc.get("status")
+        # Only stale in-flight rows (uploaded/processing) or errors are
+        # restartable. Completed rows are never re-claimed.
+        if status not in (
+            IngestionStatus.UPLOADED.value,
+            IngestionStatus.PROCESSING.value,
+            IngestionStatus.ERROR.value,
+        ):
+            return None
+
+        try:
+            updated_at = float(doc.get("updated_at") or 0)
+        except (TypeError, ValueError):
+            updated_at = 0
+        if time.time() - updated_at < stale_after:
+            # fresh: another worker is handling it right now
+            return None
+
+        now = generate_timestamp()
+        doc.update({
+            "status": IngestionStatus.PROCESSING.value,
+            "error": None,
+            "error_at": None,
+            "resume_owner": owner,
+            "resume_at": now,
+            "updated_at": now,
+        })
+        await crud.store(key, doc)
+        return doc
+
+
+async def release_resume_claim(agent_id: str, scope: str, source: str) -> None:
+    """Clear the resume-owner markers after a re-ingestion attempt.
+
+    The lifecycle hooks (``rabbithole_ingestion_start`` etc.) will later
+    overwrite the row with the new state, so clearing is best-effort: it only
+    removes the transient claim markers.
+    """
+    key = status_key(agent_id, scope, source)
+    async with crud.distributed_lock(f"ingestion-resume:{agent_id}:{scope}:{source}", timeout=30, blocking_timeout=15):
+        doc = await _read_doc(key)
+        if doc is None:
+            return
+        doc.pop("resume_owner", None)
+        doc.pop("resume_at", None)
+        await crud.store(key, doc)
 
 
 async def delete_status(agent_id: str, scope: str, source: str) -> None:

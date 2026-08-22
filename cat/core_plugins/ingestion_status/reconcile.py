@@ -27,13 +27,17 @@ async def reconcile_agent(
 ) -> List[Dict]:
     """Purge status entries whose source is absent from the canonical lists.
 
-    ERROR carve-out: entries whose ``status`` is ``"error"`` are never purged
-    by this canonical-source reconcile. A failed upload never lands in the file
-    manager / vector store, so it would otherwise be purged on first read and
-    the error badge could never be shown. Error entries remain observable via
-    the API (including chat-scoped errors whose conversation is gone — the
-    error is still meaningful). They are only removed by whole-scope wipes
-    (``clear_agent`` / ``clear_chat`` / destroy).
+    Carve-outs — never purged by this canonical-source reconcile:
+    - in-flight entries (uploaded/downloading/downloaded/processing): they are
+      legitimately not yet in the file manager / web points (these populate as
+      the pipeline advances), so purging on first read would hide the queue
+      from the dashboard;
+    - error entries: a failed upload never lands in the canonical lists, so an
+      error would otherwise vanish immediately; the teacher dismisses it via
+      DELETE /ingestion/status or re-uploads.
+
+    Only terminal COMPLETED entries whose source has genuinely vanished (file
+    removed, URL with no web points, conversation gone) are purged.
 
     Args:
         agent_id: The agent (chatbot) id.
@@ -50,6 +54,7 @@ async def reconcile_agent(
         return []
 
     entries = await list_statuses(agent_id, chat_id=chat_id)
+    never_purge = {"uploaded", "downloading", "downloaded", "processing", "error"}
     purged: List[Dict] = []
     for entry in entries:
         scope = entry.get("scope")
@@ -58,8 +63,8 @@ async def reconcile_agent(
         if not source:
             continue
 
-        # ERROR carve-out: never purge error entries via the canonical reconcile
-        if entry.get("status") == "error":
+        # in-flight / error carve-out: never purge via the canonical reconcile
+        if entry.get("status") in never_purge:
             continue
 
         # chat-scoped entries: the conversation must still exist
