@@ -83,20 +83,42 @@ class ServiceFactory:
     async def get_from_config_name(self, config_name: str) -> Any:
         factory_class = await self._get_factory_class(config_name)
         if not factory_class:
-            log.warning(
-                f"Class {config_name} not found in the list of allowed classes for setting '{self.setting_category}'"
+            log.error(
+                f"Class {config_name} not found in the list of allowed classes for setting "
+                f"'{self.setting_category}' — falling back to DumbEmbedder with a different "
+                f"embedding dimension."
             )
-            return self.default_config_class.get_from_config(self.default_config)
+            return self._fallback_default()
 
         # get configuration and instantiate the finalized object by the factory
         selected_config = await crud_settings.get_setting_by_name(self._agent_key, config_name)
         try:
             obj = factory_class.get_from_config(selected_config["value"])  # type: ignore[index]
-            if hasattr(obj, "agent_id"):
-                obj.agent_id = self._agent_key
-            return obj
-        except:
-            return self.default_config_class.get_from_config(self.default_config)
+        except Exception as e:
+            # Surface the real reason instead of silently replacing the configured embedder
+            # with the Dumb one (which emits vectors of a different dimension than the
+            # configured model, breaking Qdrant upserts with confusing dim-mismatch errors).
+            log.error(
+                f"Failed to instantiate {config_name} for agent '{self._agent_key}' "
+                f"(category '{self.setting_category}'): {e!r}. "
+                f"Falling back to the category default '{self.default_config_class.__name__}'. "
+                f"For embedders this means a DIFFERENT embedding dimension and will corrupt "
+                f"the agent's vector collections.",
+            )
+            return self._fallback_default()
+
+        await self._set_agent_id(obj)
+        return obj
+
+    def _fallback_default(self):
+        obj = self.default_config_class.get_from_config(self.default_config)
+        if hasattr(obj, "agent_id"):
+            obj.agent_id = self._agent_key
+        return obj
+
+    async def _set_agent_id(self, obj: Any) -> None:
+        if hasattr(obj, "agent_id"):
+            obj.agent_id = self._agent_key
 
     async def _get_allowed_classes(self) -> List[Type[BaseFactoryConfigModel]]:
         return await self._hook_manager.execute_hook(
