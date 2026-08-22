@@ -63,6 +63,11 @@ class RabbitHole:
             await self.setup(cat)
             lizard = self.cat.lizard
 
+            # fire the hook with the source before the memories are stored
+            await self.cat.plugin_manager.execute_hook(
+                "rabbithole_ingestion_start", filename, {}, False, caller=self.cat,
+            )
+
             # Load fyle byte in a dict
             memories = json.loads(file.read().decode("utf-8"))
 
@@ -101,6 +106,10 @@ class RabbitHole:
             )
         except Exception as e:
             log.error(f"Error uploading memories from file '{filename}': {e}")
+            # fire the error hook alongside the existing log
+            await self.cat.plugin_manager.execute_hook(
+                "rabbithole_ingestion_error", filename, str(e), caller=self.cat,
+            )
 
     async def ingest_file(
         self,
@@ -138,12 +147,25 @@ class RabbitHole:
             if not filename:
                 raise ValueError("No filename provided.")
 
+            # fire the hook with the source (the filename; for URLs the filename IS the URL)
+            # before the file is downloaded/parsed, so plugins can observe the full lifecycle
+            await self.cat.plugin_manager.execute_hook(
+                "rabbithole_ingestion_start", filename, metadata, filename.startswith("http"),
+                caller=self.stray or self.cat,
+            )
+
             # split a file into a list of docs
             source, file_bytes, content_type, docs, images, is_url = await self._file_to_docs(
                 file=file, filename=filename, content_type=content_type
             )
+
             if not docs:
                 raise Exception(f"No valid chunks found in the file '{filename}'.")
+
+            # fire the hook with the resolved source before the docs are embedded/stored
+            await self.cat.plugin_manager.execute_hook(
+                "rabbithole_ingestion_processing", source, caller=self.stray or self.cat,
+            )
 
             # store in memory
             sha256 = hashlib.sha256()
@@ -173,6 +195,10 @@ class RabbitHole:
                     await self.stray.notifier.send_error(f"Error processing {filename}: {str(e)}")
                 except Exception as notify_error:
                     log.error(f"Failed to send error notification: {notify_error}")
+            # fire the error hook alongside the existing log/notify
+            await self.cat.plugin_manager.execute_hook(
+                "rabbithole_ingestion_error", source or filename, str(e), caller=self.stray or self.cat,
+            )
         finally:
             # hook the points after they are stored in the vector memory
             await self.cat.plugin_manager.execute_hook(
@@ -215,6 +241,10 @@ class RabbitHole:
                 return sanitize_filename(filename), file.read(), content_type, False
             if fnc_is_url(file):
                 try:
+                    # notify plugins that the URL download is about to start
+                    await self.cat.plugin_manager.execute_hook(
+                        "rabbithole_url_downloading", file, filename, caller=self.stray or self.cat,
+                    )
                     # Make a request with a fake browser name - use async httpx
                     async with AsyncClient() as client:
                         response = await client.get(file, headers={"User-Agent": "Magic Browser"})
@@ -225,7 +255,12 @@ class RabbitHole:
                             "Content-Type", "text/html" if file.startswith("http") else "text/plain"
                         ).split(";")[0]
                         # Get binary content of url
-                        return file, response.content, ct, True
+                        content = response.content
+                    # notify plugins that the URL download completed successfully
+                    await self.cat.plugin_manager.execute_hook(
+                        "rabbithole_url_download_completed", file, filename, caller=self.stray or self.cat,
+                    )
+                    return file, content, ct, True
                 except Exception as e:
                     log.error(f"Agent id: {self.cat.agent_key}. Error: {e}")
                     return None, None, content_type, True
