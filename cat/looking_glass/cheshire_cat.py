@@ -1,10 +1,14 @@
 import asyncio
+import hashlib
 import mimetypes
 import os
 import tempfile
+import time
 import uuid
 from io import BytesIO
 from typing import Dict, List
+
+from langchain_core.documents import Document
 
 from cat.auth.permissions import AuthUserInfo
 from cat.db import crud
@@ -214,9 +218,10 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         Embeds stored sources into a vector memory collection.
 
         This method retrieves and processes a list of stored sources with their associated metadata and incorporates
-        them into a vector memory collection. During this process, any pre-existing embeddings in the collection are
-        cleared, and files are systematically ingested. The method handles potential irregularities such as missing
-        content or stray references and logs appropriate messages.
+        them into a vector memory collection. When the embedder changed but the collection still holds the stored
+        chunks (same-size/same-alias re-embed), the existing points are reused: only the vectors are recomputed
+        (chunk-reuse). When a source has no reusable points (e.g. the collection was just recreated by
+        ``initialize``), the source is re-ingested from its file/URL as a fallback.
 
         Args:
             collection_name (VectorMemoryType): The name of the collection where the stored sources
@@ -230,35 +235,152 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         """
         log.info(f"Agent id: {self._id}. Embedding stored files to the vector memory")
 
-        # first, clear all existing declarative and episodic embeddings
-        await self.vector_memory_handler.delete_tenant_points(str(collection_name))
+        # Collect the existing points once, up-front. We do NOT clear the collection
+        # here: on an embedder size/alias change ``initialize`` already recreated it
+        # (empty -> no chunks to reuse -> full re-ingest fallback below), while on a
+        # same-size re-embed the points persist and are reused (only vectors change).
+        existing_points, _ = await self.vector_memory_handler.get_all_tenant_points(
+            str(collection_name), with_vectors=False
+        )
 
         rabbit_hole = self.rabbit_hole
+        embedder = await self.embedder()
         counter = 0
         for source in stored_sources:
-            content_type = None
-            if source.content:
-                content_type, _ = guess_file_type(source.content)
+            source_name = source.name
+            chat_id = source.metadata.get("chat_id")
 
-            cat = self
-            if chat_id := source.metadata.get("chat_id"):
-                if not (stray_cat := await self._find_stray_cat(str(chat_id))):
-                    log.warning(f"Stray cat with id {chat_id} not found. Skipping file {source.path}/{source.name}")
+            await self._set_ingestion_status(source_name, "processing", chat_id=chat_id)
+            try:
+                # chunks already stored for this source (chunk-reuse candidates)
+                source_points = [
+                    p
+                    for p in existing_points
+                    if (p.payload or {}).get("metadata", {}).get("source") == source_name
+                ]
+
+                if source_points:
+                    # For episodic sources, the chat must still exist; otherwise the
+                    # memory is orphaned and is cleaned up (matching the pre-reuse
+                    # behavior where the source was skipped after the collection wipe).
+                    if chat_id:
+                        if not (stray_cat := await self._find_stray_cat(str(chat_id))):
+                            log.warning(
+                                f"Stray cat with id {chat_id} not found. Cleaning up {source.path}/{source.name}"
+                            )
+                            await self.vector_memory_handler.delete_tenant_points(
+                                str(collection_name), metadata={"source": source_name}
+                            )
+                            await self._set_ingestion_status(source_name, "completed", chat_id=chat_id)
+                            continue
+
+                    # Rebuild the LangChain documents from the stored chunks, dropping
+                    # the vectors: only the embedding changed, not the content.
+                    docs = [
+                        Document(
+                            page_content=(p.payload or {}).get("page_content", ""),
+                            metadata=dict((p.payload or {}).get("metadata", {})),
+                        )
+                        for p in source_points
+                    ]
+
+                    # Re-chunk only chunks exceeding the NEW embedder's input limit.
+                    docs = rabbit_hole._split_oversized(docs, embedder)
+
+                    vectors = await asyncio.to_thread(
+                        embedder.embed_documents, [d.page_content for d in docs]
+                    )
+                    points = [
+                        PointStruct(
+                            id=uuid.uuid4().hex,
+                            payload=d.model_dump(),
+                            vector=vector,
+                        )
+                        for d, vector in zip(docs, vectors)
+                    ]
+                    # Clear the source's existing points first so the re-embedded
+                    # points replace them instead of duplicating them (the reuse
+                    # branch assigns fresh ids, so without this delete the old and
+                    # new points would coexist for the same source).
+                    await self.vector_memory_handler.delete_tenant_points(
+                        str(collection_name), metadata={"source": source_name}
+                    )
+                    await self.vector_memory_handler.add_points_to_tenant(
+                        collection_name=str(collection_name), points=points
+                    )
+                    counter += 1
+                    await self._set_ingestion_status(source_name, "completed", chat_id=chat_id)
                     continue
 
-                cat = stray_cat
+                # No reusable chunks for this source (e.g. the collection was just
+                # recreated by initialize): fall back to a full re-ingest from the
+                # source file/URL.
+                content_type = None
+                if source.content:
+                    content_type, _ = guess_file_type(source.content)
 
-            await rabbit_hole.ingest_file(
-                cat=cat,
-                file=source.content or source.name,
-                filename=source.name,
-                metadata=source.metadata or {},
-                store_file=False,
-                content_type=content_type,
-            )
-            counter += 1
+                cat = self
+                if chat_id:
+                    if not (stray_cat := await self._find_stray_cat(str(chat_id))):
+                        log.warning(
+                            f"Stray cat with id {chat_id} not found. Skipping file {source.path}/{source.name}"
+                        )
+                        continue
+                    cat = stray_cat
+
+                await rabbit_hole.ingest_file(
+                    cat=cat,
+                    file=source.content or source.name,
+                    filename=source.name,
+                    metadata=source.metadata or {},
+                    store_file=False,
+                    content_type=content_type,
+                )
+                counter += 1
+                await self._set_ingestion_status(source_name, "completed", chat_id=chat_id)
+            except Exception as e:
+                log.error(f"Agent id: {self._id}. Error re-embedding source {source_name}: {e}")
+                await self._set_ingestion_status(source_name, "error", error=str(e), chat_id=chat_id)
 
         log.info(f"Agent id: {self._id}. Embedded {counter} files to the vector memory")
+
+    async def _set_ingestion_status(
+        self,
+        source: str,
+        status: str,
+        error: str | None = None,
+        chat_id: str | None = None,
+    ):
+        """Best-effort write to the ingestion-status registry namespace.
+
+        The ingestion-status plugin owns this namespace; this core path writes the
+        same key shape directly so the re-embed pass is observable even before or
+        without the plugin. Failures are logged, never raised.
+        """
+        scope = str(chat_id) if chat_id else "agent"
+        key = f"agents:{self.agent_key}:ingestion:{scope}:{hashlib.sha256(source.encode()).hexdigest()}"
+        now = time.time()
+        try:
+            existing = await crud.read(key)
+            created_at = existing.get("created_at", now) if isinstance(existing, dict) else now
+        except Exception:
+            created_at = now
+
+        payload = {
+            "source": source,
+            "scope": scope,
+            "chat_id": chat_id,
+            "type": "url" if is_url(source) else "file",
+            "status": status,
+            "error": error,
+            "error_at": now if error else None,
+            "created_at": created_at,
+            "updated_at": now,
+        }
+        try:
+            await crud.store(key, payload)
+        except Exception as e:
+            log.error(f"Agent id: {self._id}. Failed to write ingestion status for {source}: {e}")
 
     async def save_file(self, file_bytes: bytes, content_type: str, source: str, chat_id: str | None = None):
         """
