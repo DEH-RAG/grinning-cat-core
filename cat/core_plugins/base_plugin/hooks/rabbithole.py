@@ -109,3 +109,90 @@ def after_rabbithole_stored_documents(source, stored_points: List[PointStruct], 
             Cheshire Cat instance.
     """
     pass
+
+
+@hook(priority=0)
+def rabbithole_ingestion_start(source, metadata, is_url, cat) -> None:
+    """Hook fired at the START of a RabbitHole ingestion, once the source is known.
+
+    Allows plugins to observe that an ingestion is about to begin (e.g. to track
+    an ingestion-status lifecycle) before the document is parsed/split/stored.
+
+    Args:
+        source: str
+            Name of the ingested file/url (or filename for memory uploads).
+        metadata: Dict
+            Metadata to be stored with each chunk.
+        is_url: bool
+            Whether the source is a URL.
+        cat: CheshireCat or StrayCat
+            Cheshire Cat or Stray Cat instance.
+    """
+    pass
+
+
+@hook(priority=0)
+def rabbithole_ingestion_error(source, error: str, cat) -> None:
+    """Hook fired when a RabbitHole ingestion fails.
+
+    Allows plugins to observe ingestion failures (e.g. to record an error state in
+    an ingestion-status lifecycle). Fired alongside the existing log/notify.
+
+    Args:
+        source: str
+            Name of the ingested file/url (or filename if the source was not resolved).
+        error: str
+            The exception message.
+        cat: CheshireCat or StrayCat
+            Cheshire Cat or Stray Cat instance.
+    """
+    pass
+
+
+@hook(priority=0)
+def rabbithole_url_downloading(url, filename, cat) -> None:
+    """Hook fired right before a URL is downloaded by the RabbitHole.
+
+    Allows plugins to observe the ``downloading`` sub-state of a URL ingestion.
+
+    Args:
+        url: str
+            The URL being downloaded.
+        filename: str
+            The filename (for URLs this is the URL string itself).
+        cat: CheshireCat or StrayCat
+            Cheshire Cat or Stray Cat instance.
+    """
+    pass
+
+
+@hook(priority=0)
+def rabbithole_url_download_completed(url, filename, cat) -> None:
+    """Hook fired right after a URL is downloaded successfully by the RabbitHole.
+
+    Allows plugins to observe the ``downloaded`` sub-state of a URL ingestion.
+
+    Args:
+        url: str
+            The URL that was downloaded.
+        filename: str
+            The filename (for URLs this is the URL string itself).
+        cat: CheshireCat or StrayCat
+            Cheshire Cat or Stray Cat instance.
+    """
+    pass
+
+
+@hook(priority=0)
+def rabbithole_ingestion_processing(source, cat) -> None:
+    """Hook fired right before the documents of an ingestion are embedded/stored.
+
+    Allows plugins to observe the ``processing`` state of an ingestion lifecycle.
+
+    Args:
+        source: str
+            Name of the ingested file/url.
+        cat: CheshireCat or StrayCat
+            Cheshire Cat or Stray Cat instance.
+    """
+    pass

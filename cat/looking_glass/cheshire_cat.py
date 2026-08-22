@@ -7,6 +7,7 @@ from io import BytesIO
 from typing import Dict, List
 
 from cat.auth.permissions import AuthUserInfo
+from cat.db import crud
 from cat.db.cruds import (
     settings as crud_settings,
     conversations as crud_conversations,
@@ -114,6 +115,9 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         await crud_conversations.destroy_all(self._id)
         await crud_plugins.destroy_all(self._id)
         await crud_users.destroy_all(self._id)
+
+        # purge ingestion status registry keys (namespace owned by the ingestion-status plugin)
+        await crud.destroy(f"agents:{self.agent_key}:ingestion:*")
 
     async def get_stored_sources_with_metadata(self) -> Dict[VectorMemoryType, List[StoredSourceWithMetadata]]:
         """Get all stored files with their metadata."""
