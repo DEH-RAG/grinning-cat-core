@@ -4,6 +4,10 @@ __pycache__
 *mypy_cache
 *.pytest_cache
 
+# grinning cat server ids
+.pod_id
+.welcome
+
 # opencode
 .sisyphus/
 .opencode/
