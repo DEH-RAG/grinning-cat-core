@@ -31,7 +31,6 @@ ARG NO_PROXY
 FROM dhi.io/python:3.13-dev AS builder
 
 ENV PYTHONUNBUFFERED=1 \
-    UV_NO_CACHE=1 \
     UV_LINK_MODE=copy \
     PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH" \
@@ -59,7 +58,8 @@ COPY ./cat/core_plugins ./cat/core_plugins
 COPY ./scripts/hash_plugin_requirements.py ./scripts/hash_plugin_requirements.py
 
 # Deterministic single-pass install of core + all plugin extras
-RUN uv venv --seed .venv && \
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv venv --seed .venv && \
     uv sync --frozen --no-install-project --no-dev --extra plugins && \
     python3 scripts/hash_plugin_requirements.py
 
@@ -121,6 +121,8 @@ WORKDIR /app
 # Application, virtualenv, spaCy models and NLTK data — owned by the runtime user
 COPY --from=builder --chown=nonroot:nonroot /app /app
 
+RUN chown nonroot:nonroot /app
+
 # Fresh source + migrations + license
 COPY --chown=nonroot:nonroot ./cat ./cat
 COPY --chown=nonroot:nonroot ./migrations ./migrations
@@ -129,7 +131,6 @@ COPY --chown=nonroot:nonroot ./LICENSE ./
 # WORKDIR /app created the directory as root; the COPY --chown above only owned
 # the copied CONTENTS. The app writes top-level files in /app at runtime
 # (.pod_id, .welcome, dormouse/, creates data/), so own /app itself too.
-RUN chown nonroot:nonroot /app
 
 # Drop privileges for the runtime process and everything it spawns.
 # `nonroot` (uid/gid 65532) is the pre-provisioned unprivileged user shipped by
