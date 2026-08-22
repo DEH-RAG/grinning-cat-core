@@ -391,7 +391,7 @@ class MadHatter:
 
     @property
     def get_untoggling_plugin_ids(self) -> List[str]:
-        return [self.get_base_core_plugin_id] + ["white_rabbit", "march_hare"]
+        return [self.get_base_core_plugin_id] + ["ingestion_status", "white_rabbit", "march_hare"]
 
     @property
     def get_core_plugins_ids(self) -> List[str]:
