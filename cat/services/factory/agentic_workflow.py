@@ -4,6 +4,7 @@ from typing import Type, List, Dict, Tuple
 from langchain_classic.agents import create_tool_calling_agent, AgentExecutor
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.language_models import BaseLanguageModel
+from langchain_core.messages import HumanMessage
 from langchain_core.prompts import (
     ChatPromptTemplate,
     HumanMessagePromptTemplate,
@@ -86,6 +87,13 @@ class BaseAgenticWorkflowHandler(ABC):
             HumanMessagePromptTemplate.from_template(template=task.user_prompt),
             *self._task.history,  # type: ignore[misc, union-attr]
         ])
+
+        # Attach recalled multimodal images (full image_url content parts) as a
+        # concrete HumanMessage so both the no-tool and tool-binding paths carry them.
+        if task.images:
+            prompt = ChatPromptTemplate.from_messages(
+                prompt.messages + [HumanMessage(content=task.images)]
+            )
 
         # Intrinsic detection of tool binding support
         self._can_bind_tools = task.tools and hasattr(llm, "bind_tools")  # type: ignore[assignment]
