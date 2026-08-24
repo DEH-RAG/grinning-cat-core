@@ -655,6 +655,25 @@ async def test_multimodal_reembeds_multiple_images_in_one_batch(cheshire_cat, mo
         assert p.vector and len(p.vector) == FakeEmbedder.size
 
 
+class ControlledMultimodalEmbedder(FakeMultimodalEmbedder):
+    """Multimodal embedder that can fail or drop vectors from ``embed_images``,
+    to exercise the atomicity (compute-before-delete) and zip-truncation paths."""
+
+    def __init__(self, fail=False, drop_n=0):
+        super().__init__()
+        self.fail = fail
+        self.drop_n = drop_n
+
+    def embed_images(self, images):
+        self.embed_images_calls.append(list(images))
+        if self.fail:
+            raise RuntimeError("cannot embed images")
+        vectors = [[0.5] * self.size for _ in images]
+        if self.drop_n:
+            vectors = vectors[: max(0, len(vectors) - self.drop_n)]
+        return vectors
+
+
 async def test_multimodal_mixed_recoverable_and_missing_images(cheshire_cat, monkeypatch):
     """(m) Partial recovery: a source with MIXED image points (one recoverable, one
     missing) in the multimodal case. The recoverable one gets a real vector via
@@ -697,3 +716,135 @@ async def test_multimodal_mixed_recoverable_and_missing_images(cheshire_cat, mon
     assert gone.vector == {}
     assert gone.payload["page_content"] == "[Image] doc.pdf"
     assert (gone.payload.get("metadata") or {}).get("image") is True
+
+
+async def test_reuse_embed_documents_failure_preserves_old_points(cheshire_cat, monkeypatch):
+    """(n) R5/M2 atomicity (F2 #2): if ``embed_documents`` raises, the source's OLD
+    points must survive — ``delete_tenant_points`` is only reached after all
+    vectors are computed (compute-before-delete), so an embed failure must leave
+    the delete uncalled and the original points intact. Status marked error."""
+    original = [
+        _record("boom.txt", "chunk one"),
+        _record("boom.txt", "chunk two"),
+    ]
+    fake = FakeVectorHandler(points=list(original))
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FailingEmbedder("chunk two"))
+
+    writes = []
+
+    async def fake_store(key, value, path=None, nx=False, xx=False, expire=None):
+        writes.append((key, value))
+        return value
+
+    monkeypatch.setattr(crud, "store", fake_store)
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("boom.txt")],
+    )
+
+    # processing -> error, never completed
+    statuses = [v["status"] for k, v in writes if k == _status_key("boom.txt")]
+    assert statuses == ["processing", "error"]
+
+    # compute-before-delete: embed blew up before any delete ran
+    assert fake.deleted == []
+
+    # old points still present in the handler, not wiped by a partial delete
+    assert len(fake.scroll()) == len(original)
+    assert {p.id for p in fake.scroll()} == {p.id for p in original}
+
+
+async def test_multimodal_embed_images_failure_preserves_old_points(cheshire_cat, monkeypatch):
+    """(o) R5/M2 atomicity, image path: if ``embed_images`` raises mid-batch, the
+    source's OLD points survive — delete_tenant_points is only reached after ALL
+    vectors are computed, so the raise must propagate to an error status with the
+    delete never called."""
+    original = [
+        _image_record("fotos.txt", "foto_0.png"),
+        _image_record("fotos.txt", "foto_1.png"),
+    ]
+    fake = FakeVectorHandler(points=list(original))
+    embedder = ControlledMultimodalEmbedder(fail=True)
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    root_dir = agent_id
+    monkeypatch.setattr(
+        cheshire_cat,
+        "file_manager",
+        FakeFileManager({root_dir: {"foto_0.png": b"b0", "foto_1.png": b"b1"}}),
+    )
+
+    writes = []
+
+    async def fake_store(key, value, path=None, nx=False, xx=False, expire=None):
+        writes.append((key, value))
+        return value
+
+    monkeypatch.setattr(crud, "store", fake_store)
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("fotos.txt")],
+    )
+
+    # embed_images was attempted with both recoverable bytes in one batch
+    assert embedder.embed_images_calls == [[b"b0", b"b1"]]
+
+    statuses = [v["status"] for k, v in writes if k == _status_key("fotos.txt")]
+    assert statuses == ["processing", "error"]
+    err = next(
+        v for k, v in writes if k == _status_key("fotos.txt") and v["status"] == "error"
+    )
+    assert "cannot embed images" in err["error"]
+
+    # delete never ran; the old image points survive untouched
+    assert fake.deleted == []
+    assert len(fake.scroll()) == len(original)
+    assert {p.id for p in fake.scroll()} == {p.id for p in original}
+
+
+async def test_multimodal_embed_images_truncation_is_detected(cheshire_cat, monkeypatch):
+    """(p) R5 #4 (F2 #4): if ``embed_images`` returns FEWER vectors than the images
+    it was given, the tail must NOT be silently dropped via ``zip`` truncation —
+    that would mark the source completed while a point the source still needs is
+    deleted and never re-added. The correct behavior is to raise (treated as a
+    failure), preserving the old points through the compute-before-delete
+    invariant."""
+    original = [
+        _image_record("galeria.txt", "img_0.png"),
+        _image_record("galeria.txt", "img_1.png"),
+    ]
+    fake = FakeVectorHandler(points=list(original))
+    # returns only ONE vector for the TWO recoverable images (zip truncation tripwire)
+    embedder = ControlledMultimodalEmbedder(drop_n=1)
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    root_dir = agent_id
+    monkeypatch.setattr(
+        cheshire_cat,
+        "file_manager",
+        FakeFileManager({root_dir: {"img_0.png": b"b0", "img_1.png": b"b1"}}),
+    )
+
+    writes = []
+
+    async def fake_store(key, value, path=None, nx=False, xx=False, expire=None):
+        writes.append((key, value))
+        return value
+
+    monkeypatch.setattr(crud, "store", fake_store)
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("galeria.txt")],
+    )
+
+    # the truncating embed_images got both recoverable images in one batch
+    assert embedder.embed_images_calls == [[b"b0", b"b1"]]
+
+    # a short vector list is a failure, not a silent drop: status error, no delete
+    statuses = [v["status"] for k, v in writes if k == _status_key("galeria.txt")]
+    assert statuses == ["processing", "error"]
+
+    # compute-before-delete: the mismatch aborts before delete_tenant_points runs
+    assert fake.deleted == []
+    assert len(fake.scroll()) == len(original)
+    assert {p.id for p in fake.scroll()} == {p.id for p in original}

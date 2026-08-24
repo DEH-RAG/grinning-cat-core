@@ -355,6 +355,15 @@ class CheshireCat(BotMixin, NonCopyableMixin):
                                 image_vectors = await asyncio.to_thread(
                                     embedder.embed_images, [b for _, b in recoverable]
                                 )
+                                if len(image_vectors) != len(recoverable):
+                                    # The embedder silently dropped vectors (or the
+                                    # batch was truncated): abort before the delete
+                                    # so no point is lost (compute-before-delete) and
+                                    # the source is marked error, not completed.
+                                    raise ValueError(
+                                        f"embed_images returned {len(image_vectors)} vectors "
+                                        f"for {len(recoverable)} images"
+                                    )
                                 for (p, _b), vector in zip(recoverable, image_vectors):
                                     meta = dict((p.payload or {}).get("metadata", {}))
                                     points.append(
