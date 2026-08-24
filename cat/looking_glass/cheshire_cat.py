@@ -24,6 +24,7 @@ from cat.looking_glass.mad_hatter.procedures import CatProcedureType
 from cat.looking_glass.models import StoredSourceWithMetadata
 from cat.looking_glass.stray_cat import StrayCat
 from cat.mixins import BotMixin, NonCopyableMixin
+from cat.services.factory.embedder import is_multimodal_embedder
 from cat.services.factory.file_manager import BaseFileManager
 from cat.services.factory.vector_db import BaseVectorDatabaseHandler
 from cat.services.memory.models import VectorMemoryType, PointStruct
@@ -276,32 +277,122 @@ class CheshireCat(BotMixin, NonCopyableMixin):
 
                     # Rebuild the LangChain documents from the stored chunks, dropping
                     # the vectors: only the embedding changed, not the content.
-                    docs = [
-                        Document(
-                            page_content=(p.payload or {}).get("page_content", ""),
-                            metadata=dict((p.payload or {}).get("metadata", {})),
-                        )
+                    # Image points (metadata.image == True) are handled separately:
+                    # they must never be embedded as plain text.
+                    source_points_text = [
+                        p
                         for p in source_points
+                        if not (p.payload or {}).get("metadata", {}).get("image")
+                    ]
+                    source_points_image = [
+                        p
+                        for p in source_points
+                        if (p.payload or {}).get("metadata", {}).get("image")
                     ]
 
-                    # Re-chunk only chunks exceeding the NEW embedder's input limit.
-                    docs = rabbit_hole._split_oversized(docs, embedder)
+                    points = []
 
-                    vectors = await asyncio.to_thread(
-                        embedder.embed_documents, [d.page_content for d in docs]
-                    )
-                    points = [
-                        PointStruct(
-                            id=uuid.uuid4().hex,
-                            payload=d.model_dump(),
-                            vector=vector,
+                    # --- text points: existing path unchanged ---
+                    if source_points_text:
+                        docs = [
+                            Document(
+                                page_content=(p.payload or {}).get("page_content", ""),
+                                metadata=dict((p.payload or {}).get("metadata", {})),
+                            )
+                            for p in source_points_text
+                        ]
+
+                        # Re-chunk only chunks exceeding the NEW embedder's input limit.
+                        docs = rabbit_hole._split_oversized(docs, embedder)
+
+                        vectors = await asyncio.to_thread(
+                            embedder.embed_documents, [d.page_content for d in docs]
                         )
-                        for d, vector in zip(docs, vectors)
-                    ]
+                        points.extend(
+                            PointStruct(
+                                id=uuid.uuid4().hex,
+                                payload=d.model_dump(),
+                                vector=vector,
+                            )
+                            for d, vector in zip(docs, vectors)
+                        )
+
+                    # --- image points: only re-embed via embed_images when multimodal ---
+                    if source_points_image:
+                        if is_multimodal_embedder(embedder):
+                            # Recover the saved image bytes (same agent_key[/chat_id]
+                            # layout as get_stored_sources_with_metadata/save_file) and
+                            # re-embed them in a single embed_images call.
+                            recoverable = []
+                            for p in source_points_image:
+                                meta = (p.payload or {}).get("metadata", {})
+                                image_file = meta.get("image_file")
+                                root_dir = self.agent_key
+                                if chat_id := meta.get("chat_id"):
+                                    root_dir = os.path.join(root_dir, str(chat_id))
+                                image_bytes = (
+                                    self.file_manager.read_file(image_file, root_dir)
+                                    if image_file
+                                    else None
+                                )
+                                if image_bytes is None:
+                                    # H2 fallback: the image file is gone; keep the
+                                    # point payload-only (no vector) instead of failing
+                                    # the whole source.
+                                    points.append(
+                                        PointStruct(
+                                            id=uuid.uuid4().hex,
+                                            payload={
+                                                "page_content": f"[Image] {source_name}",
+                                                "metadata": dict(meta),
+                                            },
+                                            vector={},
+                                        )
+                                    )
+                                else:
+                                    recoverable.append((p, image_bytes))
+                            if recoverable:
+                                image_vectors = await asyncio.to_thread(
+                                    embedder.embed_images, [b for _, b in recoverable]
+                                )
+                                for (p, _b), vector in zip(recoverable, image_vectors):
+                                    meta = dict((p.payload or {}).get("metadata", {}))
+                                    points.append(
+                                        PointStruct(
+                                            id=uuid.uuid4().hex,
+                                            payload={
+                                                "page_content": f"[Image] {source_name}",
+                                                "metadata": meta,
+                                            },
+                                            vector=vector,
+                                        )
+                                    )
+                        else:
+                            # Non-multimodal embedder image handling: keep the image
+                            # points payload-only (vector={}) so they are preserved
+                            # and recoverable rather than dropped or mis-embedded as
+                            # text. The full original payload is copied over; the
+                            # empty vector removes the point from ANN similarity
+                            # recall while a scroll still returns it.
+                            for p in source_points_image:
+                                meta = dict((p.payload or {}).get("metadata", {}))
+                                points.append(
+                                    PointStruct(
+                                        id=uuid.uuid4().hex,
+                                        payload={
+                                            "page_content": f"[Image] {source_name}",
+                                            "metadata": meta,
+                                        },
+                                        vector={},
+                                    )
+                                )
+
                     # Clear the source's existing points first so the re-embedded
                     # points replace them instead of duplicating them (the reuse
                     # branch assigns fresh ids, so without this delete the old and
-                    # new points would coexist for the same source).
+                    # new points would coexist for the same source). All vectors are
+                    # computed above BEFORE the delete so a failure leaves the old
+                    # points intact.
                     await self.vector_memory_handler.delete_tenant_points(
                         str(collection_name), metadata={"source": source_name}
                     )

@@ -7,6 +7,7 @@ recomputed, through the ``BaseVectorDatabaseHandler`` interface only (no Qdrant
 classes). A fake handler implementing the interface stands in for the vector DB.
 """
 import hashlib
+import os
 
 from langchain_core.documents import Document
 
@@ -42,6 +43,48 @@ class FailingEmbedder(FakeEmbedder):
         return super().embed_documents(texts)
 
 
+class FakeMultimodalEmbedder(FakeEmbedder):
+    """Multimodal embedder exposing ``embed_images`` and recording its calls."""
+
+    name = "FakeMultimodalEmbedder"
+
+    def __init__(self):
+        self.embed_documents_calls = []
+        self.embed_images_calls = []
+
+    def embed_documents(self, texts):
+        self.embed_documents_calls.append(list(texts))
+        return [[0.1] * self.size for _ in texts]
+
+    def embed_images(self, images):
+        self.embed_images_calls.append(list(images))
+        return [[0.5] * self.size for _ in images]
+
+
+class RecordingTextEmbedder(FakeEmbedder):
+    """Plain text-only embedder (no image API) that records its ``embed_documents``
+    inputs, so a test can assert image payloads never reach the text embedder."""
+
+    name = "RecordingTextEmbedder"
+
+    def __init__(self):
+        self.embed_documents_calls = []
+
+    def embed_documents(self, texts):
+        self.embed_documents_calls.append(list(texts))
+        return [[0.1] * self.size for _ in texts]
+
+
+class FakeFileManager:
+    """Stub file manager resolving ``read_file`` from a {root_dir: {name: bytes}} map."""
+
+    def __init__(self, files):
+        self.files = files  # {root_dir: {name: bytes | None}}
+
+    def read_file(self, remote_filename, remote_root_dir=None):
+        return self.files.get(remote_root_dir, {}).get(remote_filename)
+
+
 class FakeVectorHandler:
     """In-memory ``BaseVectorDatabaseHandler`` interface implementation.
 
@@ -59,10 +102,38 @@ class FakeVectorHandler:
         return list(self.points), None
 
     async def add_points_to_tenant(self, collection_name, points):
+        # persist the write like a real vector DB, so scroll/similarity_recall
+        # below observe the same post-delete state the reuse path produced
         self.added.append((collection_name, points))
+        self.points.extend(points)
 
     async def delete_tenant_points(self, collection_name, metadata=None):
         self.deleted.append((collection_name, metadata))
+        if metadata and "source" in metadata:
+            source = metadata["source"]
+            self.points = [
+                p
+                for p in self.points
+                if (p.payload or {}).get("metadata", {}).get("source") != source
+            ]
+
+    def scroll(self, collection_name=None):
+        """Model a full Qdrant scroll listing: ALL points, including vector-less ones."""
+        return list(self.points)
+
+    def similarity_recall(self):
+        """Model an ANN ``query_points`` recall against the stored points.
+
+        Real Qdrant stores a payload-only point (``vector={}``) but does NOT return
+        it from a similarity search; a vector-less point participates in scroll but
+        never in ANN recall. This helper mirrors that: points with an absent or
+        empty vector are excluded.
+        """
+        return [
+            p
+            for p in self.points
+            if p.vector is not None and p.vector != {}
+        ]
 
 
 def _record(source, page_content, when=123.0, file_hash="abc", chat_id=None):
@@ -75,6 +146,30 @@ def _record(source, page_content, when=123.0, file_hash="abc", chat_id=None):
         payload={
             "id": "some-id",
             "page_content": page_content,
+            "metadata": metadata,
+            "tenant_id": agent_id,
+        },
+        vector=[0.1, 0.2, 0.3, 0.4],
+    )
+
+
+def _image_record(source, image_file, when=123.0, file_hash="abc", chat_id=None):
+    """Build a stored image ``Record`` matching the payload ``store_documents``
+    writes for a multimodal image point."""
+    metadata = {
+        "source": source,
+        "when": when,
+        "hash": file_hash,
+        "image": True,
+        "image_file": image_file,
+    }
+    if chat_id:
+        metadata["chat_id"] = chat_id
+    return Record(
+        id=hashlib.sha256(f"{source}:{image_file}".encode()).hexdigest(),
+        payload={
+            "id": "some-img-id",
+            "page_content": f"[Image] {source}",
             "metadata": metadata,
             "tenant_id": agent_id,
         },
@@ -252,3 +347,188 @@ async def test_one_source_failing_marks_error_others_complete(cheshire_cat, monk
     boom_error = [v for k, v in writes if k == _status_key("boom.txt") and v["status"] == "error"][0]
     assert "cannot embed" in boom_error["error"]
     assert boom_error["error_at"] is not None
+
+
+async def test_multimodal_reembeds_image_points_via_embed_images(cheshire_cat, monkeypatch):
+    """(f) With a multimodal embedder, image points are re-embedded through
+    ``embed_images`` (recovering bytes from the file manager), keep their original
+    ``[Image] {source}`` payload + ``image=True``/``image_file`` and carry a real
+    vector; text chunks keep using the ``embed_documents`` path unchanged."""
+    fake = FakeVectorHandler(points=[
+        _record("doc.pdf", "chunk one"),
+        _image_record("doc.pdf", "doc_img_0.png", chat_id="chat-1"),
+    ])
+    embedder = FakeMultimodalEmbedder()
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    # the image file lives under the agent_key/chat_id layout used by save_file
+    root_dir = os.path.join(agent_id, "chat-1")
+    monkeypatch.setattr(
+        cheshire_cat, "file_manager", FakeFileManager({root_dir: {"doc_img_0.png": b"image-bytes"}}),
+    )
+
+    # a real stray cat would exist for an episodic source; simulate it so the
+    # chunk-reuse path is reached instead of the cleanup-continue branch
+    async def fake_find_stray_cat(_chat_id):
+        return object()
+
+    monkeypatch.setattr(cheshire_cat, "_find_stray_cat", fake_find_stray_cat)
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("doc.pdf", chat_id="chat-1")],
+    )
+
+    # images recovered from the file manager and embedded in ONE embed_images call
+    assert embedder.embed_images_calls == [[b"image-bytes"]]
+
+    # the image payload never went through embed_documents
+    for texts in embedder.embed_documents_calls:
+        assert all("[Image]" not in t for t in texts)
+
+    assert len(fake.added) == 1
+    collection, points = fake.added[0]
+    assert collection == str(VectorMemoryType.DECLARATIVE)
+    assert len(points) == 2
+
+    image_points = [p for p in points if (p.payload.get("metadata") or {}).get("image")]
+    text_points = [p for p in points if not (p.payload.get("metadata") or {}).get("image")]
+
+    # text chunk re-embedded exactly as before
+    assert len(text_points) == 1
+    assert text_points[0].payload["page_content"] == "chunk one"
+    assert len(text_points[0].vector) == FakeEmbedder.size
+
+    # image point keeps the original payload shape with a real (non-empty) vector
+    assert len(image_points) == 1
+    img = image_points[0]
+    assert img.payload["page_content"] == "[Image] doc.pdf"
+    meta = img.payload["metadata"]
+    assert meta["image"] is True
+    assert meta["image_file"] == "doc_img_0.png"
+    assert meta["source"] == "doc.pdf"
+    assert img.vector and len(img.vector) == FakeEmbedder.size
+
+
+async def test_multimodal_missing_file_keeps_image_point_payload_only(cheshire_cat, monkeypatch):
+    """(g) H2 fallback: when a multimodal embedder's ``read_file`` returns None, the
+    image point is kept payload-only with ``vector={}``, ``embed_images`` is not
+    called for it, and the source completes without error."""
+    fake = FakeVectorHandler(points=[
+        _image_record("doc.pdf", "doc_img_0.png"),
+    ])
+    embedder = FakeMultimodalEmbedder()
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    root_dir = agent_id
+    monkeypatch.setattr(
+        cheshire_cat, "file_manager", FakeFileManager({root_dir: {"doc_img_0.png": None}}),
+    )
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("doc.pdf")],
+    )
+
+    # no recoverable bytes -> embed_images is never called
+    assert embedder.embed_images_calls == []
+
+    # the image point is re-added payload-only (no real vector), source completes
+    assert len(fake.added) == 1
+    _, points = fake.added[0]
+    assert len(points) == 1
+    img = points[0]
+    assert img.payload["page_content"] == "[Image] doc.pdf"
+    assert (img.payload.get("metadata") or {}).get("image") is True
+    assert img.vector == {}
+
+
+async def test_nonmultimodal_keeps_image_points_payload_only(cheshire_cat, monkeypatch):
+    """(h) With a plain text (non-multimodal) embedder, image points are re-added
+    PAYLOAD-ONLY with ``vector={}``: the full original payload survives
+    (``[Image] {source}`` page_content, ``image=True``, ``image_file``, source,
+    when, hash, chat_id). ``embed_documents`` never sees image content, the image
+    file is not deleted, and text chunks still embed normally."""
+    fake = FakeVectorHandler(points=[
+        _record("doc.pdf", "chunk one"),
+        _image_record("doc.pdf", "doc_img_0.png", chat_id="chat-1"),
+    ])
+    embedder = RecordingTextEmbedder()
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    # the image file lives under the agent_key/chat_id layout used by save_file
+    root_dir = os.path.join(agent_id, "chat-1")
+    file_manager = FakeFileManager({root_dir: {"doc_img_0.png": b"image-bytes"}})
+    monkeypatch.setattr(cheshire_cat, "file_manager", file_manager)
+
+    async def fake_find_stray_cat(_chat_id):
+        return object()
+
+    monkeypatch.setattr(cheshire_cat, "_find_stray_cat", fake_find_stray_cat)
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("doc.pdf", chat_id="chat-1")],
+    )
+
+    # image payload never reached the text embedder
+    for texts in embedder.embed_documents_calls:
+        assert all("[Image]" not in t for t in texts)
+
+    assert len(fake.added) == 1
+    collection, points = fake.added[0]
+    assert collection == str(VectorMemoryType.DECLARATIVE)
+    assert len(points) == 2
+
+    image_points = [p for p in points if (p.payload.get("metadata") or {}).get("image")]
+    text_points = [p for p in points if not (p.payload.get("metadata") or {}).get("image")]
+
+    # text chunk re-embedded exactly as before
+    assert len(text_points) == 1
+    assert text_points[0].payload["page_content"] == "chunk one"
+    assert len(text_points[0].vector) == FakeEmbedder.size
+
+    # image point preserved payload-only
+    assert len(image_points) == 1
+    img = image_points[0]
+    assert img.payload["page_content"] == "[Image] doc.pdf"
+    assert img.vector == {}
+    meta = img.payload["metadata"]
+    assert meta["image"] is True
+    assert meta["image_file"] == "doc_img_0.png"
+    assert meta["source"] == "doc.pdf"
+    assert "when" in meta
+    assert "hash" in meta
+    assert meta["chat_id"] == "chat-1"
+
+    # the image file is NOT deleted from the file manager (stays on disk)
+    assert file_manager.files[root_dir]["doc_img_0.png"] == b"image-bytes"
+
+
+async def test_nonmultimodal_vectorless_point_in_scroll_but_not_in_sim_recall(cheshire_cat, monkeypatch):
+    """(i) Mirrors real Qdrant behavior: after the delete-then-add, the re-added
+    vector-less image point (``vector={}``) IS present in a full scroll listing but
+    is NOT returned by an ANN similarity recall (which skips points with no
+    vector). Text points behave normally."""
+    fake = FakeVectorHandler(points=[
+        _record("doc.pdf", "chunk one"),
+        _image_record("doc.pdf", "doc_img_0.png"),
+    ])
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("doc.pdf")],
+    )
+
+    # full listing (scroll): BOTH the text chunk and the vector-less image survive
+    scrolled = fake.scroll()
+    assert len(scrolled) == 2
+    image_scrolled = [
+        p for p in scrolled if (p.payload.get("metadata") or {}).get("image")
+    ]
+    assert len(image_scrolled) == 1
+    assert image_scrolled[0].payload["page_content"] == "[Image] doc.pdf"
+    assert image_scrolled[0].vector == {}
+
+    # ANN similarity recall drops the vector-less point, keeps the text point
+    recalled = fake.similarity_recall()
+    assert len(recalled) == 1
+    assert not (recalled[0].payload.get("metadata") or {}).get("image")
+    assert recalled[0].payload["page_content"] == "chunk one"

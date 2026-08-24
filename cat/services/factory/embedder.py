@@ -64,6 +64,16 @@ class MultimodalEmbeddings(Embeddings, ABC):
         pass
 
 
+def is_multimodal_embedder(embedder) -> bool:
+    """Whether a resolved embedder *instance* can embed images.
+
+    Used by the chunk-reuse re-embed path, where only the instance is available
+    (no ``RabbitHole``/settings). True iff the embedder is a
+    ``MultimodalEmbeddings`` subclass OR exposes an ``embed_images`` attribute.
+    """
+    return isinstance(embedder, MultimodalEmbeddings) or hasattr(embedder, "embed_images")
+
+
 class DumbEmbedder(Embeddings):
     """Default Dumb Embedder.
 
