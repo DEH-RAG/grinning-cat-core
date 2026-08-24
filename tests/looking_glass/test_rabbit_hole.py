@@ -1,3 +1,4 @@
+import asyncio
 import base64
 from io import BytesIO
 import types
@@ -416,3 +417,96 @@ async def test_file_to_docs_parse_runs_off_event_loop(cheshire_cat, monkeypatch)
     parsed = calls["to_thread_callables"][0]()
     assert calls["parse_calls"] == 1
     assert parsed[0].page_content == "parsed content"
+
+
+def _mock_ingestion_pipeline(monkeypatch, cheshire_cat, state):
+    """Monkeypatch the heavy ``ingest_file`` body so only ``_file_to_docs`` runs.
+
+    ``_file_to_docs`` is replaced by a slow coroutine that tracks a shared
+    active counter, so concurrent calls can be observed overlapping. Everything
+    downstream (store, file save, hooks, notifications) is stubbed out.
+    """
+    async def slow_file_to_docs(self, file, filename, content_type=None):
+        state["active"] += 1
+        state["entered"] += 1
+        state["max_active"] = max(state["max_active"], state["active"])
+        await asyncio.sleep(0.05)  # keep the body busy so overlap is observable
+        state["active"] -= 1
+        return "source.txt", b"file bytes", "text/plain", [Document(page_content="hello")], [], False
+
+    async def fake_store_documents(self, docs, source, file_hash=None, metadata=None, images=None, source_bytes=None):
+        return []
+
+    async def fake_send_notification(self, message):
+        pass
+
+    async def fake_save_file(self, file_bytes, content_type, source, chat_id=None):
+        pass
+
+    async def fake_execute_hook(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(RabbitHole, "_file_to_docs", slow_file_to_docs)
+    monkeypatch.setattr(RabbitHole, "store_documents", fake_store_documents)
+    monkeypatch.setattr(RabbitHole, "_send_notification_message", fake_send_notification)
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+    monkeypatch.setattr(cheshire_cat.plugin_manager, "execute_hook", fake_execute_hook)
+
+    rabbit_hole_a = RabbitHole()
+    rabbit_hole_a.cat = cheshire_cat
+    rabbit_hole_a.stray = None
+    rabbit_hole_b = RabbitHole()
+    rabbit_hole_b.cat = cheshire_cat
+    rabbit_hole_b.stray = None
+    return rabbit_hole_a, rabbit_hole_b
+
+
+async def test_ingest_file_concurrency_bounded_by_max_concurrency(cheshire_cat, monkeypatch):
+    """Concurrent ``ingest_file`` calls are serialized to ``CAT_INGESTION_MAX_CONCURRENCY``.
+
+    The semaphore is process-wide (module-level, shared across RabbitHole
+    instances) and its size is read lazily at runtime. With the env var set to
+    ``1``, two concurrent ``ingest_file`` calls must never run their heavy body
+    at the same time: the second blocks on the semaphore until the first
+    releases it.
+    """
+    state = {"active": 0, "max_active": 0, "entered": 0}
+    rabbit_hole_a, rabbit_hole_b = _mock_ingestion_pipeline(monkeypatch, cheshire_cat, state)
+
+    # force a fresh module-level semaphore so the env value below is read
+    # (raising=False: on pre-change code the attribute does not exist yet and
+    # the test must still run to prove the concurrency is unbounded)
+    monkeypatch.setattr("cat.rabbit_hole._ingestion_semaphore", None, raising=False)
+    monkeypatch.setenv("CAT_INGESTION_MAX_CONCURRENCY", "1")
+
+    await asyncio.gather(
+        rabbit_hole_a.ingest_file(cat=cheshire_cat, file=BytesIO(b"a"), metadata={}, filename="a.txt"),
+        rabbit_hole_b.ingest_file(cat=cheshire_cat, file=BytesIO(b"b"), metadata={}, filename="b.txt"),
+    )
+
+    assert state["entered"] == 2
+    # bounded: the two bodies never overlap, even though they were launched together
+    assert state["max_active"] == 1
+
+
+async def test_ingest_file_unlimited_when_max_concurrency_non_positive(cheshire_cat, monkeypatch):
+    """``CAT_INGESTION_MAX_CONCURRENCY <= 0`` means no semaphore: calls overlap.
+
+    The unlimited path must NOT acquire the semaphore: with the env var set to
+    ``0``, two concurrent ``ingest_file`` calls run their heavy body at the same
+    time (previous behavior is preserved).
+    """
+    state = {"active": 0, "max_active": 0, "entered": 0}
+    rabbit_hole_a, rabbit_hole_b = _mock_ingestion_pipeline(monkeypatch, cheshire_cat, state)
+
+    monkeypatch.setattr("cat.rabbit_hole._ingestion_semaphore", None, raising=False)
+    monkeypatch.setenv("CAT_INGESTION_MAX_CONCURRENCY", "0")
+
+    await asyncio.gather(
+        rabbit_hole_a.ingest_file(cat=cheshire_cat, file=BytesIO(b"a"), metadata={}, filename="a.txt"),
+        rabbit_hole_b.ingest_file(cat=cheshire_cat, file=BytesIO(b"b"), metadata={}, filename="b.txt"),
+    )
+
+    assert state["entered"] == 2
+    # unlimited: both bodies ran concurrently (no semaphore acquired)
+    assert state["max_active"] == 2
