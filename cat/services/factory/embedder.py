@@ -12,6 +12,13 @@ from cat.services.factory.models import BaseFactoryConfigModel
 from cat.utils import get_nlp_object_name
 
 
+# Caps for attaching recalled multimodal images to the LLM prompt per turn.
+# Consumed by ``StrayCat.__call__`` to bound how many recalled images get
+# attached to the LLM prompt in a single turn.
+MAX_IMAGES_PER_TURN = 5
+MAX_IMAGE_TOTAL_BYTES = 5 * 1024 * 1024  # 5 MiB total across all images in one turn
+
+
 class Embeddings(LangChainEmbeddings, ABC):
     """Base class for all embedders."""
 
