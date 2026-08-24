@@ -1,7 +1,7 @@
 import asyncio
 import base64
-from io import BytesIO
 import types
+from io import BytesIO
 
 from langchain_community.document_loaders.parsers.generic import MimeTypeBasedParser
 from langchain_core.documents import Document
