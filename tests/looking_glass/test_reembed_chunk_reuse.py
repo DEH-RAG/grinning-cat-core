@@ -532,3 +532,168 @@ async def test_nonmultimodal_vectorless_point_in_scroll_but_not_in_sim_recall(ch
     assert len(recalled) == 1
     assert not (recalled[0].payload.get("metadata") or {}).get("image")
     assert recalled[0].payload["page_content"] == "chunk one"
+
+
+async def test_multimodal_whole_image_source_reembeds_source_bytes(cheshire_cat, monkeypatch):
+    """(j) Whole-image source: a direct image upload stores ``image_file`` = the
+    source itself (rabbit_hole.py:468), with no derived crop file. With a
+    multimodal embedder, the re-embed recovers the whole image bytes via
+    ``read_file(image_file=source, root_dir=agent_key)`` and re-embeds them like a
+    normal image point: original ``[Image] {source}`` payload preserved + a real
+    vector."""
+    source = "photo.jpg"
+    fake = FakeVectorHandler(points=[_image_record(source, source)])
+    embedder = FakeMultimodalEmbedder()
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    # whole-image bytes live directly under the agent_key root (image_file = source)
+    monkeypatch.setattr(
+        cheshire_cat,
+        "file_manager",
+        FakeFileManager({agent_id: {"photo.jpg": b"whole-image-bytes"}}),
+    )
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source(source)],
+    )
+
+    # recovered via read_file(image_file=source, root_dir=agent_key) and embedded
+    # in a single embed_images call
+    assert embedder.embed_images_calls == [[b"whole-image-bytes"]]
+
+    assert len(fake.added) == 1
+    _, points = fake.added[0]
+    assert len(points) == 1
+    img = points[0]
+    assert img.payload["page_content"] == "[Image] photo.jpg"
+    meta = img.payload["metadata"]
+    assert meta["image"] is True
+    assert meta["image_file"] == "photo.jpg"
+    assert meta["source"] == "photo.jpg"
+    assert img.vector and len(img.vector) == FakeEmbedder.size
+
+
+async def test_nonmultimodal_whole_image_source_kept_payload_only(cheshire_cat, monkeypatch):
+    """(k) Whole-image source with a non-multimodal embedder: the image point is
+    re-added PAYLOAD-ONLY with ``vector={}``. No bytes are read (``read_file`` is
+    never called); the original payload (``[Image]`` page_content, ``image=True``,
+    ``image_file == source``) survives."""
+    source = "photo.jpg"
+    fake = FakeVectorHandler(points=[_image_record(source, source)])
+    embedder = RecordingTextEmbedder()
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    file_manager = FakeFileManager({agent_id: {"photo.jpg": b"whole-image-bytes"}})
+    # a read_file spy to prove the non-multimodal path never recovers bytes
+    read_files = []
+
+    class SpyingFileManager(FakeFileManager):
+        def read_file(self, remote_filename, remote_root_dir=None):
+            read_files.append((remote_filename, remote_root_dir))
+            return super().read_file(remote_filename, remote_root_dir)
+
+    monkeypatch.setattr(cheshire_cat, "file_manager", SpyingFileManager(file_manager.files))
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("photo.jpg")],
+    )
+
+    # non-multimodal image handling does not read the file at all
+    assert read_files == []
+    assert embedder.embed_documents_calls == []
+
+    assert len(fake.added) == 1
+    _, points = fake.added[0]
+    assert len(points) == 1
+    img = points[0]
+    assert img.vector == {}
+    assert img.payload["page_content"] == "[Image] photo.jpg"
+    meta = img.payload["metadata"]
+    assert meta["image"] is True
+    assert meta["image_file"] == "photo.jpg"
+    assert meta["source"] == "photo.jpg"
+
+
+async def test_multimodal_reembeds_multiple_images_in_one_batch(cheshire_cat, monkeypatch):
+    """(l) A source with several image points is re-embedded in ONE ``embed_images``
+    batch (single call with all N bytes), not N separate calls — matching the
+    ``store_documents`` batching at rabbit_hole.py:470-471."""
+    fake = FakeVectorHandler(points=[
+        _image_record("doc.pdf", "doc_img_0.png"),
+        _image_record("doc.pdf", "doc_img_1.png"),
+        _image_record("doc.pdf", "doc_img_2.png"),
+    ])
+    embedder = FakeMultimodalEmbedder()
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    root_dir = agent_id
+    monkeypatch.setattr(
+        cheshire_cat,
+        "file_manager",
+        FakeFileManager({root_dir: {
+            "doc_img_0.png": b"bytes-0",
+            "doc_img_1.png": b"bytes-1",
+            "doc_img_2.png": b"bytes-2",
+        }}),
+    )
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("doc.pdf")],
+    )
+
+    # exactly ONE embed_images call with all three byte payloads, in seed order
+    assert embedder.embed_images_calls == [[b"bytes-0", b"bytes-1", b"bytes-2"]]
+
+    assert len(fake.added) == 1
+    _, points = fake.added[0]
+    assert len(points) == 3
+    image_points = [p for p in points if (p.payload.get("metadata") or {}).get("image")]
+    assert len(image_points) == 3
+    files = sorted(p.payload["metadata"]["image_file"] for p in image_points)
+    assert files == ["doc_img_0.png", "doc_img_1.png", "doc_img_2.png"]
+    for p in image_points:
+        assert p.vector and len(p.vector) == FakeEmbedder.size
+
+
+async def test_multimodal_mixed_recoverable_and_missing_images(cheshire_cat, monkeypatch):
+    """(m) Partial recovery: a source with MIXED image points (one recoverable, one
+    missing) in the multimodal case. The recoverable one gets a real vector via
+    ``embed_images``; the missing one is kept payload-only with ``vector={}``; the
+    source completes without error."""
+    fake = FakeVectorHandler(points=[
+        _image_record("doc.pdf", "present.png"),
+        _image_record("doc.pdf", "gone.png"),
+    ])
+    embedder = FakeMultimodalEmbedder()
+    await _install_embedder(cheshire_cat, monkeypatch, fake, embedder)
+
+    root_dir = agent_id
+    monkeypatch.setattr(
+        cheshire_cat,
+        "file_manager",
+        FakeFileManager({root_dir: {"present.png": b"present-bytes", "gone.png": None}}),
+    )
+
+    await cheshire_cat.embed_stored_sources(
+        VectorMemoryType.DECLARATIVE, [_source("doc.pdf")],
+    )
+
+    # only the recoverable image is embedded, and in a single call
+    assert embedder.embed_images_calls == [[b"present-bytes"]]
+
+    assert len(fake.added) == 1
+    _, points = fake.added[0]
+    assert len(points) == 2
+    by_file = {
+        (p.payload.get("metadata") or {}).get("image_file"): p
+        for p in points
+    }
+    # recoverable image got a real vector
+    present = by_file["present.png"]
+    assert present.payload["page_content"] == "[Image] doc.pdf"
+    assert present.vector and len(present.vector) == FakeEmbedder.size
+    # missing image kept payload-only
+    gone = by_file["gone.png"]
+    assert gone.vector == {}
+    assert gone.payload["page_content"] == "[Image] doc.pdf"
+    assert (gone.payload.get("metadata") or {}).get("image") is True
