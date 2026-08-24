@@ -279,10 +279,13 @@ class RabbitHole:
         fh = await self.cat.file_handlers()
         log.debug(f"Attempting to parse source: {source}. Detected MIME type: {content_type}. Available handlers: {list(fh.keys())}")
 
-        # Load the bytes in the Blob schema and parse the content. Parser based on the mime type
+        # Load the bytes in the Blob schema and parse the content. Parser based on the mime type.
+        # The parser is CPU/IO-bound (e.g. PyMuPDF on a large PDF): run it off the event loop.
         await self._send_notification_message("I'm parsing the content. Big content could require some minutes...")
-        super_docs = MimeTypeBasedParser(handlers=fh).parse(
-            Blob(data=file_bytes, mimetype=content_type).from_data(data=file_bytes, mime_type=content_type, path=source)
+        super_docs = await asyncio.to_thread(
+            lambda: MimeTypeBasedParser(handlers=fh).parse(
+                Blob(data=file_bytes, mimetype=content_type).from_data(data=file_bytes, mime_type=content_type, path=source)
+            )
         )
 
         # Propagate the source to every parsed document BEFORE chunking, so that

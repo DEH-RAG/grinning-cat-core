@@ -1,6 +1,8 @@
 import base64
+from io import BytesIO
 import types
 
+from langchain_community.document_loaders.parsers.generic import MimeTypeBasedParser
 from langchain_core.documents import Document
 
 from cat.db.database import DEFAULT_SYSTEM_KEY
@@ -364,3 +366,53 @@ async def test_is_multimodal_embedder_uses_lizard_context(cheshire_cat, monkeypa
 
     assert captured["agent_key"] == DEFAULT_SYSTEM_KEY
     assert captured["plugin_manager_agent_key"] == DEFAULT_SYSTEM_KEY
+
+
+async def test_file_to_docs_parse_runs_off_event_loop(cheshire_cat, monkeypatch):
+    """The synchronous parser must be deferred via ``asyncio.to_thread``.
+
+    ``MimeTypeBasedParser.parse`` is CPU/IO-bound (e.g. PyMuPDF on a large PDF)
+    and must not run inline on the asyncio event loop. This test records every
+    ``asyncio.to_thread`` call made by ``_file_to_docs`` and asserts the parse
+    happens inside the deferred callable, not inline.
+    """
+    calls = {"to_thread_callables": [], "parse_calls": 0}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        # Record the deferred callable but do NOT run it: the test asserts the
+        # parse is deferred, then invokes the callable itself to prove it.
+        calls["to_thread_callables"].append(func)
+        return []
+
+    def fake_parse(self, blob):
+        calls["parse_calls"] += 1
+        return [Document(page_content="parsed content")]
+
+    monkeypatch.setattr("cat.rabbit_hole.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr(MimeTypeBasedParser, "parse", fake_parse)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    # keep the test focused on the parse step: skip chunking and multimodal detection
+    async def fake_split(self, docs):
+        return docs
+
+    monkeypatch.setattr(RabbitHole, "_split_text", fake_split)
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _text_only)
+
+    await rabbit_hole._file_to_docs(
+        file=BytesIO(b"hello world"), filename="test.txt", content_type="text/plain",
+    )
+
+    # the parse must NOT have run inline on the event loop
+    assert calls["parse_calls"] == 0
+    # it must have been deferred through asyncio.to_thread (exactly once: the
+    # BytesIO path skips the file-read to_thread at the top of _file_to_docs)
+    assert len(calls["to_thread_callables"]) == 1
+
+    # invoking the deferred callable performs the actual parse
+    parsed = calls["to_thread_callables"][0]()
+    assert calls["parse_calls"] == 1
+    assert parsed[0].page_content == "parsed content"
