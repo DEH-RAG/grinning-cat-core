@@ -1,6 +1,10 @@
 import asyncio
+import base64
+import os
 import uuid
-from typing import List, Final
+from io import BytesIO
+from typing import Dict, List, Final
+from PIL import Image
 from langchain_core.tools import StructuredTool
 from websockets.exceptions import ConnectionClosedOK
 
@@ -11,6 +15,7 @@ from cat.looking_glass.mad_hatter.mad_hatter import MadHatter
 from cat.looking_glass.mad_hatter.procedures import CatProcedure
 from cat.looking_glass.models import AgenticWorkflowTask, AgenticWorkflowOutput, ChatResponse
 from cat.mixins import BotMixin, NonCopyableMixin
+from cat.services.factory.embedder import is_multimodal_embedder, MAX_IMAGES_PER_TURN, MAX_IMAGE_TOTAL_BYTES
 from cat.services.memory.messages import CatMessage, UserMessage
 from cat.services.memory.models import VectorMemoryType, RecallSettings
 from cat.services.memory.working_memory import WorkingMemory
@@ -152,6 +157,68 @@ class StrayCat(BotMixin, NonCopyableMixin):
 
         return tools
 
+    async def _attach_recalled_images(self, embedder) -> List[Dict]:
+        """Recover recalled multimodal memory images and build LLM content parts.
+
+        Returns a list of full LangChain content parts
+        (``{"type": "image_url", "image_url": {"url": "<data-uri>"}}``) for the
+        images recalled into the working memory this turn, so a vision-capable
+        LLM can see them. Returns ``[]`` when the embedder is not multimodal,
+        the LLM is not vision-capable, there are no image recalls, or anything
+        fails — the ``[Image]`` text placeholder already in the context keeps
+        the turn working text-only.
+        """
+        try:
+            if not is_multimodal_embedder(embedder):
+                return []
+
+            capable = await self.plugin_manager.execute_hook("llm_vision_capable", True, caller=self)
+            if not capable:
+                return []
+
+            images: List[Dict] = []
+            total_bytes = 0
+            for m in self.working_memory.context_memories:
+                if len(images) >= MAX_IMAGES_PER_TURN:
+                    break
+
+                metadata = m.document.metadata
+                if metadata.get("image") is not True:
+                    continue
+
+                image_file = metadata.get("image_file")
+                if not image_file:
+                    continue
+
+                # Same agent_key[/chat_id] layout as CheshireCat.save_file and
+                # embed_stored_sources.
+                root_dir = self.agent_key
+                if chat_id := metadata.get("chat_id"):
+                    root_dir = os.path.join(root_dir, str(chat_id))
+
+                image_bytes = self.file_manager.read_file(image_file, root_dir)
+                if image_bytes is None:
+                    continue
+
+                if total_bytes + len(image_bytes) > MAX_IMAGE_TOTAL_BYTES:
+                    break
+
+                mime = metadata.get("image_mime_type")
+                if not mime:
+                    try:
+                        mime = Image.MIME[Image.open(BytesIO(image_bytes)).format]
+                    except Exception:
+                        mime = "image/png"
+
+                data_uri = f"data:{mime};base64,{base64.b64encode(image_bytes).decode('utf-8')}"
+                images.append({"type": "image_url", "image_url": {"url": data_uri}})
+                total_bytes += len(image_bytes)
+
+            return images
+        except Exception as e:
+            log.warning(f"Agent id: {self.agent_key}. Could not attach recalled images to the LLM prompt. Error: {e}")
+            return []
+
     async def __call__(self, user_message: UserMessage, **kwargs) -> CatMessage:
         """
         Run the conversation turn.
@@ -224,12 +291,14 @@ class StrayCat(BotMixin, NonCopyableMixin):
             tools = await procedures_task
 
             # prepare agent input
+            images = await self._attach_recalled_images(embedder)
             agent_input = AgenticWorkflowTask(
                 system_prompt=system_prompt,
                 user_prompt=self.working_memory.user_message.text,  # type: ignore[arg-type]
                 context=[m.document for m in self.working_memory.context_memories],
                 history=[h.langchainfy() for h in self.working_memory.history[-config.latest_n_history:]],
                 tools=tools,
+                images=images,
             )
 
             agent_output = await self._agentic_workflow.run(
