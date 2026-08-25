@@ -697,3 +697,99 @@ async def test_ingest_file_saves_file_before_parsing(cheshire_cat, monkeypatch):
     # agent-scope ingest: the file is saved with the resolved bytes, content type,
     # source and a None chat_id
     assert saved_files == [(b"hello world", "text/plain", "hello.txt", None)]
+
+
+async def test_ingest_file_survives_restart_via_resume(cheshire_cat, monkeypatch):
+    """F3: a container restart during a large-file parse does not lose the file.
+
+    ``ingest_file`` persists the bytes to the file manager BEFORE the (slow)
+    parse runs. A simulated restart + resume of the stale ``uploaded`` entry
+    then re-reads the file from disk and completes it — never hitting the
+    "file missing" path.
+    """
+    import time
+    from unittest.mock import AsyncMock
+
+    from cat.core_plugins.ingestion_status import plugin as ingestion_plugin
+    from cat.core_plugins.ingestion_status import resume as ingestion_resume
+    from cat.core_plugins.ingestion_status.registry import get_status, status_key
+    from cat.db import crud
+
+    agent_key = cheshire_cat.agent_key
+    source = "hello.txt"
+    file_bytes = b"hello world"
+
+    # ---- phase 1: in-flight large-file ingestion ----------------------------
+    # The fixture's file manager is a DummyFileManager (not writable), so the
+    # durable-persist guarantee is proven by ORDER: save_file must run BEFORE
+    # the (slow) parse. The resume phase below then proves the persisted bytes
+    # are read back from disk and the ingestion completes.
+    order: list = []
+    saved: list = []
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        order.append("save_file")
+        saved.append((file_bytes, content_type, source, chat_id))
+
+    async def slow_parse_to_docs(self, source, file_bytes, content_type=None):
+        order.append("parse")
+        await asyncio.sleep(0.05)  # simulate a long parse
+        return [Document(page_content="x")], []
+
+    async def fake_store_documents(self, docs, source, file_hash=None, metadata=None, images=None, source_bytes=None):
+        return []
+
+    async def fake_execute_hook(self, *args, **kwargs):
+        return None
+
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+    monkeypatch.setattr(RabbitHole, "_parse_to_docs", slow_parse_to_docs)
+    monkeypatch.setattr(RabbitHole, "store_documents", fake_store_documents)
+    monkeypatch.setattr(cheshire_cat.plugin_manager, "execute_hook", fake_execute_hook)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    await rabbit_hole.ingest_file(
+        cat=cheshire_cat, file=BytesIO(file_bytes), metadata={}, filename=source, content_type="text/plain",
+    )
+
+    # the file bytes were persisted BEFORE the slow parse completed
+    assert order == ["save_file", "parse"]
+    assert saved == [(file_bytes, "text/plain", source, None)]
+
+    # ---- phase 2: simulated restart + resume --------------------------------
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", source), {
+        "source": source,
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": "uploaded",
+        "error": None,
+        "error_at": None,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(cheshire_cat.lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    # the file is present on disk (persisted in phase 1)
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda s, p: file_bytes)
+
+    calls = []
+
+    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
+        calls.append((cat, file, filename))
+        await ingestion_plugin.after_rabbithole_stored_documents.function(filename, [object()], cat)
+
+    monkeypatch.setattr(cheshire_cat.lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+
+    await ingestion_resume._resume_agent(cheshire_cat.lizard, agent_key)
+
+    # the resume re-ingested the file exactly once (no "file missing" path)
+    assert len(calls) == 1
+    assert calls[0][2] == source
+    doc = await get_status(agent_key, "agent", source)
+    assert doc is not None
+    assert doc["status"] == "completed"
