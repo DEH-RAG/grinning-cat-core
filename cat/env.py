@@ -25,6 +25,7 @@ def get_supported_env_variables():
         "CAT_CRYPTO_SALT": "grinning_cat_salt",
         "CAT_INGESTION_MAX_CONCURRENCY": "2",
         "CAT_INGESTION_WORKERS": "2",
+        "CAT_INGESTION_NICENESS": "5",
     }
 
 

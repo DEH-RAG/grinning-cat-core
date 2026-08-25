@@ -10,11 +10,18 @@ whose worker count is bounded by ``CAT_INGESTION_WORKERS``. It complements the
 semaphore bounds how many ingestion tasks run at once, while this pool keeps
 those tasks off the shared default executor.
 
+Each worker thread is additionally de-prioritized (``nice``) via
+``CAT_INGESTION_NICENESS`` (default 5, ``<= 0`` disables): under CPU pressure
+the OS scheduler gives the rest of MyCAT (chat/recall) a higher share than the
+ingestion workers, so a heavy ingestion yields CPU to interactive work instead
+of competing on equal footing.
+
 Importing this module has zero side effects: the pool is only created on first
 use via ``_get_ingestion_pool()``.
 """
 
 import asyncio
+import os
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TypeVar
@@ -23,7 +30,23 @@ from cat.env import get_env_int
 
 T = TypeVar("T")
 
+#: Default ``nice`` used for the ingestion worker threads (0 disables).
+_INGESTION_NICENESS_ENV = "CAT_INGESTION_NICENESS"
+_INGESTION_NICENESS_DEFAULT = 5
+
 _pool: ThreadPoolExecutor | None = None
+
+
+def _set_worker_niceness(niceness: int) -> None:
+    """Lower the priority of the current worker thread.
+
+    Sets an absolute nicer value for the *current thread* on Linux
+    (``PRIO_PROCESS`` with ``who=0`` is implemented per-thread in the kernel
+    ``task_struct``). Raising niceness (de-prioritizing) is always permitted;
+    only lowering (negative values) would require privileges.
+    """
+    if niceness > 0:
+        os.setpriority(os.PRIO_PROCESS, 0, niceness)
 
 
 def _get_ingestion_pool() -> ThreadPoolExecutor | None:
@@ -39,9 +62,16 @@ def _get_ingestion_pool() -> ThreadPoolExecutor | None:
         max_workers = get_env_int("CAT_INGESTION_WORKERS")
         if max_workers is None or max_workers <= 0:
             return None
+        niceness = get_env_int(_INGESTION_NICENESS_ENV)
+        if niceness is None:
+            niceness = _INGESTION_NICENESS_DEFAULT
+        # ``initializer`` runs in each worker thread; ``_set_worker_niceness``
+        # is a no-op when ``niceness <= 0`` (de-prioritization disabled).
         _pool = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="cat-ingestion",
+            initializer=_set_worker_niceness,
+            initargs=(niceness,),
         )
     return _pool
 

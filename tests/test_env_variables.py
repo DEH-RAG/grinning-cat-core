@@ -42,3 +42,13 @@ def test_get_env_int_ingestion_workers():
     os.environ["CAT_INGESTION_WORKERS"] = "5"
     assert get_env_int("CAT_INGESTION_WORKERS") == 5
     del os.environ["CAT_INGESTION_WORKERS"]
+
+
+def test_get_env_int_ingestion_niceness():
+    # default value is 5
+    assert get_env_int("CAT_INGESTION_NICENESS") == 5
+
+    # explicit env override is honored
+    os.environ["CAT_INGESTION_NICENESS"] = "10"
+    assert get_env_int("CAT_INGESTION_NICENESS") == 10
+    del os.environ["CAT_INGESTION_NICENESS"]
