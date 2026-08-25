@@ -102,6 +102,8 @@ async def test_resume_leaves_fresh_alone(cheshire_cat, monkeypatch):
     })
 
     monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    # the file is present on disk (a fresh entry is being actively processed)
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda source, remote: b"content")
     calls = []
 
     async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
@@ -364,3 +366,155 @@ async def test_fresh_processing_claimed_by_other_worker_not_double_ingested(ches
     assert len(calls) == 1
     doc = await get_status(agent_key, "agent", "same.pdf")
     assert doc["status"] == "completed"
+
+
+async def test_resume_marks_stale_processing_error_when_file_missing(cheshire_cat, monkeypatch):
+    """A stale ``processing`` entry whose file is gone is marked ``error`` (pre-check)."""
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "gone.pdf"), {
+        "source": "gone.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": "processing",
+        "error": None,
+        "error_at": None,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda source, remote: None)
+
+    calls = []
+
+    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
+        calls.append(filename)
+
+    monkeypatch.setattr(lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+
+    await resume._resume_agent(lizard, agent_key)
+
+    assert calls == []
+    doc = await get_status(agent_key, "agent", "gone.pdf")
+    assert doc is not None
+    assert doc["status"] == "error"
+    assert doc["error"] == "Source file does not exist on disk; cannot resume. Remove the file to abandon it."
+
+
+async def test_resume_marks_stale_uploaded_error_when_file_missing(cheshire_cat, monkeypatch):
+    """A stale ``uploaded`` entry whose file is gone is marked ``error`` (pre-check)."""
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "gone_upload.pdf"), {
+        "source": "gone_upload.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": "uploaded",
+        "error": None,
+        "error_at": None,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda source, remote: None)
+
+    calls = []
+
+    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
+        calls.append(filename)
+
+    monkeypatch.setattr(lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+
+    await resume._resume_agent(lizard, agent_key)
+
+    assert calls == []
+    doc = await get_status(agent_key, "agent", "gone_upload.pdf")
+    assert doc is not None
+    assert doc["status"] == "error"
+    assert doc["error"] == "Source file does not exist on disk; cannot resume. Remove the file to abandon it."
+
+
+async def test_resume_marks_error_when_file_missing_at_read_step(cheshire_cat, monkeypatch):
+    """File present at pre-check but gone at the re-ingest read -> marked ``error``."""
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "vanished.pdf"), {
+        "source": "vanished.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": "processing",
+        "error": None,
+        "error_at": None,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    reads = {"count": 0}
+
+    def flaky_read(source, remote):
+        reads["count"] += 1
+        return b"content" if reads["count"] == 1 else None
+
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", flaky_read)
+
+    calls = []
+
+    async def fake_ingest(cat, file, metadata, filename=None, **kwargs):
+        calls.append(filename)
+
+    monkeypatch.setattr(lizard.rabbit_hole, "ingest_file", fake_ingest)
+
+    await resume._resume_agent(lizard, agent_key)
+
+    assert calls == []
+    doc = await get_status(agent_key, "agent", "vanished.pdf")
+    assert doc is not None
+    assert doc["status"] == "error"
+    assert doc["error"] == "Source file does not exist on disk; cannot resume. Remove the file to abandon it."
+
+
+async def test_resume_does_not_mark_url_error(cheshire_cat, monkeypatch):
+    """A stale URL entry is re-downloaded, never marked ``error`` for a missing file."""
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "https://example.com/doc.pdf"), {
+        "source": "https://example.com/doc.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "url",
+        "status": "processing",
+        "error": None,
+        "error_at": None,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+
+    calls = []
+
+    async def fake_ingest(cat, file, metadata, filename=None, **kwargs):
+        calls.append(filename)
+
+    monkeypatch.setattr(lizard.rabbit_hole, "ingest_file", fake_ingest)
+
+    await resume._resume_agent(lizard, agent_key)
+
+    assert calls == ["https://example.com/doc.pdf"]
+    doc = await get_status(agent_key, "agent", "https://example.com/doc.pdf")
+    assert doc is not None
+    assert doc["status"] != "error"

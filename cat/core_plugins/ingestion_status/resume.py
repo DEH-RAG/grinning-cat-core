@@ -22,6 +22,7 @@ from cat.core_plugins.ingestion_status.registry import (
     IngestionStatus,
     claim_source_for_resume,
     list_statuses,
+    set_status,
 )
 from cat.core_plugins.ingestion_status.reconcile import reconcile_agent
 from cat.db import crud
@@ -46,6 +47,30 @@ def _stale_seconds() -> int:
     """Staleness threshold for resume, defaulting to 300 seconds."""
     value = get_env_int("CAT_INGESTION_RESUME_STALE_SECONDS")
     return value if value is not None and value > 0 else 300
+
+
+async def mark_file_missing(agent_id: str, scope: str, source: str) -> None:
+    """Mark a source whose file is missing on disk as ``error``.
+
+    A stale ``uploaded``/``processing`` entry whose source file no longer
+    exists on disk cannot be resumed; instead of leaving it ``processing``
+    forever, transition it to ``error`` so the teacher sees why and can
+    re-upload (or remove the file to abandon it).
+
+    Args:
+        agent_id: The agent (chatbot) id.
+        scope: ``"agent"`` for the agent KB, or a conversation ``chat_id``.
+        source: The ingested file name.
+    """
+    await set_status(
+        agent_id,
+        scope,
+        source,
+        type_="file",
+        status=IngestionStatus.ERROR,
+        chat_id=None if scope == "agent" else scope,
+        error="Source file does not exist on disk; cannot resume. Remove the file to abandon it.",
+    )
 
 
 async def _resume_agent(lizard: BillTheLizard, agent_id: str, ccat: Any = None) -> None:
@@ -97,6 +122,7 @@ async def _resume_agent(lizard: BillTheLizard, agent_id: str, ccat: Any = None) 
                     log.warning(
                         f"Ingestion resume: file {source} missing for agent {agent_id}; skipping"
                     )
+                    await mark_file_missing(agent_id, str(scope), source)
                     continue
             except Exception as e:
                 log.warning(f"Ingestion resume: cannot check file {source} for {agent_id}: {e}")
@@ -135,6 +161,7 @@ async def _resume_agent(lizard: BillTheLizard, agent_id: str, ccat: Any = None) 
                     log.warning(
                         f"Ingestion resume: file {source} missing for agent {agent_id}; skipping"
                     )
+                    await mark_file_missing(agent_id, str(scope), source)
                     continue
                 file_io = BytesIO(file_bytes)
                 content_type, _ = guess_file_type(file_io)
