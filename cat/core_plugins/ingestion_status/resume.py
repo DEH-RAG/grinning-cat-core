@@ -190,6 +190,10 @@ async def _pass_for_agent(lizard: BillTheLizard, agent_id: str) -> None:
                 await _resume_agent(lizard, agent_id, ccat=ccat)
             if _gc_enabled():
                 await reconcile_agent(agent_id, ccat=ccat)
+    except crud.LockError:
+        # Another replica is already running this sweep: expected contention
+        # across workers, not a fault. Log as info and move on.
+        log.info(f"Ingestion sweep for agent {agent_id} skipped: lock held by another worker")
     except Exception as e:
         log.error(f"Ingestion startup pass failed for agent {agent_id}: {e}")
 
