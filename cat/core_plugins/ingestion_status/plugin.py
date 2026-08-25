@@ -7,6 +7,8 @@ Lifecycle written by these hooks:
     files:  uploaded -> processing -> completed | error
     urls:   uploaded -> downloading -> downloaded -> processing -> completed | error
 """
+import asyncio
+
 from cat import hook
 from cat.core_plugins.ingestion_status.registry import IngestionStatus, get_status, set_status
 
@@ -26,6 +28,29 @@ def _source_type(source: str, is_url: bool = False) -> str:
     if is_url or source.startswith("http"):
         return "url"
     return "file"
+
+
+async def _heartbeat_status(agent_id: str, scope: str, source: str, interval: float) -> None:
+    """Periodically bump ``updated_at`` of a PROCESSING row while it is being handled.
+
+    A long parse/embed can otherwise make the row look stale and get re-claimed
+    by another worker (see ``claim_source_for_resume``). Stops as soon as the
+    row leaves the PROCESSING state.
+    """
+    while True:
+        await asyncio.sleep(interval)
+        current = await get_status(agent_id, scope, source)
+        if current and current.get("status") == IngestionStatus.PROCESSING.value:
+            await set_status(
+                agent_id,
+                scope,
+                source,
+                type_=current.get("type", "file"),
+                status=IngestionStatus.PROCESSING,
+                chat_id=current.get("chat_id"),
+            )
+        else:
+            return
 
 
 @hook(priority=0)

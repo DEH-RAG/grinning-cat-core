@@ -180,6 +180,7 @@ class RabbitHole:
         """
         source = ""
         points = []
+        heartbeat_task = None
 
         try:
             await self.setup(cat)
@@ -218,16 +219,26 @@ class RabbitHole:
                     chat_id = self.stray.id if self.stray else None
                     await self.cat.save_file(file_bytes, content_type, source, chat_id)
 
+                # fire the processing hook once the worker has picked the file up
+                # (persisted to disk), before the potentially long parse/embed body
+                await self.cat.plugin_manager.execute_hook(
+                    "rabbithole_ingestion_processing", source, caller=self.stray or self.cat,
+                )
+
+                # keep the PROCESSING row fresh while the body runs, so a long
+                # parse is not re-claimed as stale by another worker
+                scope = self.stray.id if self.stray else "agent"
+                heartbeat_interval = get_env_int("CAT_INGESTION_HEARTBEAT_SECONDS") or 30
+                from cat.core_plugins.ingestion_status.plugin import _heartbeat_status
+                heartbeat_task = asyncio.ensure_future(
+                    _heartbeat_status(self.cat.agent_key, scope, source, heartbeat_interval)
+                )
+
                 # split a file into a list of docs
                 docs, images = await self._parse_to_docs(source, file_bytes, content_type)
 
                 if not docs:
                     raise Exception(f"No valid chunks found in the file '{filename}'.")
-
-                # fire the hook with the resolved source before the docs are embedded/stored
-                await self.cat.plugin_manager.execute_hook(
-                    "rabbithole_ingestion_processing", source, caller=self.stray or self.cat,
-                )
 
                 # store in memory
                 sha256 = hashlib.sha256()
@@ -257,6 +268,13 @@ class RabbitHole:
                 "rabbithole_ingestion_error", source or filename, str(e), caller=self.stray or self.cat,
             )
         finally:
+            # stop the heartbeat so no orphan task keeps bumping the row
+            if heartbeat_task:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
             # hook the points after they are stored in the vector memory
             await self.cat.plugin_manager.execute_hook(
                 "after_rabbithole_stored_documents", source, points, caller=self.stray or self.cat,
