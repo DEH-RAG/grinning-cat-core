@@ -52,10 +52,7 @@ RUN apt-get update && \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Manifests first, to leverage layer caching (rebuilt only when deps change)
-COPY pyproject.toml uv.lock requirements-models.txt ./
-COPY ./cat/core_plugins ./cat/core_plugins
-COPY ./scripts/hash_plugin_requirements.py ./scripts/hash_plugin_requirements.py
+COPY requirements-models.txt ./
 
 # 1) Early, cacheable model layer: create the venv, install ONLY the pinned
 #    spacy+nltk, then pre-download the spaCy models and NLTK data. This layers
@@ -70,6 +67,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     spacy download en_core_web_lg && \
     spacy download en_core_web_sm && \
     python -m nltk.downloader -d /app/nltk_data punkt averaged_perceptron_tagger
+
+# Manifests first, to leverage layer caching (rebuilt only when deps change)
+COPY pyproject.toml uv.lock requirements-models.txt ./
+COPY ./cat/core_plugins ./cat/core_plugins
+COPY ./scripts/hash_plugin_requirements.py ./scripts/hash_plugin_requirements.py
 
 # 2) Full deterministic install of core + all plugin extras (spacy+nltk and the
 # model data are already present and match the lock, so this step is clean).
