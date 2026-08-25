@@ -1,0 +1,1 @@
+{"id":"structured_json","name":"Structured JSON LLM","version":"0.1.0","author_name":"MyCAT","description":"Utility to call the configured LLM for structured JSON validated against Pydantic. Does not replace the conversation workflow.","tags":"structured,json,llm"}
