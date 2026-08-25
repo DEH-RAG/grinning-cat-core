@@ -17,6 +17,7 @@ from langchain_core.documents.base import Document, Blob
 from cat.env import get_env_int
 from cat.log import log
 from cat.services.factory.chunker import BaseChunker
+from cat.services.ingestion_executor import run_in_ingestion_executor
 from cat.services.memory.models import VectorMemoryType, PointStruct
 from cat.services.service_factory import ServiceFactory
 from cat.utils import is_url as fnc_is_url
@@ -330,7 +331,7 @@ class RabbitHole:
         # Load the bytes in the Blob schema and parse the content. Parser based on the mime type.
         # The parser is CPU/IO-bound (e.g. PyMuPDF on a large PDF): run it off the event loop.
         await self._send_notification_message("I'm parsing the content. Big content could require some minutes...")
-        super_docs = await asyncio.to_thread(
+        super_docs = await run_in_ingestion_executor(
             lambda: MimeTypeBasedParser(handlers=fh).parse(
                 Blob(data=file_bytes, mimetype=content_type).from_data(data=file_bytes, mime_type=content_type, path=source)
             )
@@ -495,7 +496,7 @@ class RabbitHole:
 
         # hook the points before they are stored in the vector memory
         valid_documents = list(filter(lambda doc_: doc_.page_content.strip(), docs))
-        storing_vectors = await asyncio.to_thread(
+        storing_vectors = await run_in_ingestion_executor(
             lambda: embedder.embed_documents([doc_.page_content for doc_ in valid_documents])
         )
         points = [PointStruct(
@@ -515,10 +516,10 @@ class RabbitHole:
                 # sub-crops. Embed the source file itself as a single whole-image
                 # point (image_file = the source, no derived file) and ignore crops.
                 whole_image = source_bytes if source_bytes is not None else (images[0]["image_bytes"] if images else None)
-                embeds = await asyncio.to_thread(lambda: embedder.embed_images([whole_image])) if whole_image is not None else []
+                embeds = await run_in_ingestion_executor(lambda: embedder.embed_images([whole_image])) if whole_image is not None else []
                 files_and_vectors = [(source, embeds[0])] if embeds and embeds[0] is not None else []
             else:
-                image_vectors = await asyncio.to_thread(
+                image_vectors = await run_in_ingestion_executor(
                     lambda: embedder.embed_images([img["image_bytes"] for img in images])
                 )
                 files_and_vectors = []

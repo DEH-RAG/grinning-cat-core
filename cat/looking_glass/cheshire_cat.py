@@ -1,4 +1,3 @@
-import asyncio
 import hashlib
 import mimetypes
 import os
@@ -27,6 +26,7 @@ from cat.mixins import BotMixin, NonCopyableMixin
 from cat.services.factory.embedder import is_multimodal_embedder
 from cat.services.factory.file_manager import BaseFileManager
 from cat.services.factory.vector_db import BaseVectorDatabaseHandler
+from cat.services.ingestion_executor import run_in_ingestion_executor
 from cat.services.memory.models import VectorMemoryType, PointStruct
 from cat.utils import guess_file_type, is_url
 
@@ -175,7 +175,7 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         # Single batched embed call — much cheaper than N × embed_query, and offloaded
         # to a thread so the event loop is not blocked by the (synchronous) embedder.
         embedder = await self.embedder()
-        vectors = await asyncio.to_thread(
+        vectors = await run_in_ingestion_executor(
             embedder.embed_documents, [document.page_content for document in documents]
         )
 
@@ -305,7 +305,7 @@ class CheshireCat(BotMixin, NonCopyableMixin):
                         # Re-chunk only chunks exceeding the NEW embedder's input limit.
                         docs = rabbit_hole._split_oversized(docs, embedder)
 
-                        vectors = await asyncio.to_thread(
+                        vectors = await run_in_ingestion_executor(
                             embedder.embed_documents, [d.page_content for d in docs]
                         )
                         points.extend(
@@ -352,7 +352,7 @@ class CheshireCat(BotMixin, NonCopyableMixin):
                                 else:
                                     recoverable.append((p, image_bytes))
                             if recoverable:
-                                image_vectors = await asyncio.to_thread(
+                                image_vectors = await run_in_ingestion_executor(
                                     embedder.embed_images, [b for _, b in recoverable]
                                 )
                                 if len(image_vectors) != len(recoverable):

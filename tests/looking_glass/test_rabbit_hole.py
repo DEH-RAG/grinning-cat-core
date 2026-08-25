@@ -384,6 +384,46 @@ async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatc
     assert not points[0].payload["metadata"].get("image")
 
 
+async def test_store_documents_embedding_runs_in_ingestion_executor(cheshire_cat, monkeypatch):
+    """Text embedding in ``store_documents`` is routed to the ingestion lane.
+
+    The embedding call must be dispatched through ``run_in_ingestion_executor``
+    (the dedicated low-concurrency pool), not run inline on the event loop.
+    """
+    stored: dict = {}
+    calls = {"deferred_callables": []}
+
+    async def fake_add_points(collection_name, points):
+        stored["points"] = points
+
+    async def fake_run_in_ingestion_executor(func, *args, **kwargs):
+        # Record the deferred embedding callable and return a fixed vector list.
+        calls["deferred_callables"].append(func)
+        return [[0.1] * 4 for _ in range(2)]
+
+    # detection reports a text-only embedder so only the text-embedding lane runs
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _text_only)
+    monkeypatch.setattr("cat.rabbit_hole.run_in_ingestion_executor", fake_run_in_ingestion_executor)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    docs = [
+        Document(page_content="a text chunk"),
+        Document(page_content="another text chunk"),
+    ]
+
+    points = await rabbit_hole.store_documents(docs=docs, source="test.txt", metadata={})
+
+    # the embedding was routed to the dedicated lane, not run inline
+    assert len(calls["deferred_callables"]) == 1
+    # the returned points carry the vectors produced by the deferred embedding
+    assert len(points) == 2
+    assert all(p.vector == [0.1] * 4 for p in points)
+
+
 async def test_text_points_do_not_carry_image_base64(cheshire_cat, monkeypatch):
     """The base64 image payload must not be stored in the TEXT points' metadata.
 
@@ -473,26 +513,26 @@ async def test_is_multimodal_embedder_uses_lizard_context(cheshire_cat, monkeypa
 
 
 async def test_file_to_docs_parse_runs_off_event_loop(cheshire_cat, monkeypatch):
-    """The synchronous parser must be deferred via ``asyncio.to_thread``.
+    """The synchronous parser must be deferred via ``run_in_ingestion_executor``.
 
     ``MimeTypeBasedParser.parse`` is CPU/IO-bound (e.g. PyMuPDF on a large PDF)
     and must not run inline on the asyncio event loop. This test records every
-    ``asyncio.to_thread`` call made by ``_file_to_docs`` and asserts the parse
-    happens inside the deferred callable, not inline.
+    ``run_in_ingestion_executor`` call made by ``_file_to_docs`` and asserts the
+    parse happens inside the deferred callable, not inline.
     """
-    calls = {"to_thread_callables": [], "parse_calls": 0}
+    calls = {"deferred_callables": [], "parse_calls": 0}
 
-    async def fake_to_thread(func, *args, **kwargs):
+    async def fake_run_in_ingestion_executor(func, *args, **kwargs):
         # Record the deferred callable but do NOT run it: the test asserts the
         # parse is deferred, then invokes the callable itself to prove it.
-        calls["to_thread_callables"].append(func)
+        calls["deferred_callables"].append(func)
         return []
 
     def fake_parse(self, blob):
         calls["parse_calls"] += 1
         return [Document(page_content="parsed content")]
 
-    monkeypatch.setattr("cat.rabbit_hole.asyncio.to_thread", fake_to_thread)
+    monkeypatch.setattr("cat.rabbit_hole.run_in_ingestion_executor", fake_run_in_ingestion_executor)
     monkeypatch.setattr(MimeTypeBasedParser, "parse", fake_parse)
 
     rabbit_hole = RabbitHole()
@@ -512,12 +552,12 @@ async def test_file_to_docs_parse_runs_off_event_loop(cheshire_cat, monkeypatch)
 
     # the parse must NOT have run inline on the event loop
     assert calls["parse_calls"] == 0
-    # it must have been deferred through asyncio.to_thread (exactly once: the
-    # BytesIO path skips the file-read to_thread at the top of _file_to_docs)
-    assert len(calls["to_thread_callables"]) == 1
+    # it must have been deferred through run_in_ingestion_executor (exactly once:
+    # the BytesIO path skips the file-read to_thread at the top of _file_to_docs)
+    assert len(calls["deferred_callables"]) == 1
 
     # invoking the deferred callable performs the actual parse
-    parsed = calls["to_thread_callables"][0]()
+    parsed = calls["deferred_callables"][0]()
     assert calls["parse_calls"] == 1
     assert parsed[0].page_content == "parsed content"
 
