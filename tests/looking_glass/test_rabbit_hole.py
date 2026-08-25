@@ -27,6 +27,21 @@ class FakeMultimodalEmbedder(MultimodalEmbeddings):
         return [[0.1] * 4 for _ in images]
 
 
+class PartialFailMultimodalEmbedder(FakeMultimodalEmbedder):
+    """Multimodal embedder that returns ``None`` for a failed/skipped image embed.
+
+    Mirrors the MyPLUS vLLM embedder contract after the "skip image and continue"
+    decision: a failed image yields a ``None`` placeholder in the aligned
+    ``embed_images`` result list (and ``embed_image`` returns ``None``).
+    """
+
+    def embed_image(self, image):
+        return None
+
+    def embed_images(self, images):
+        return [None if i == 0 else [0.1] * 4 for i in range(len(images))]
+
+
 
 async def _multimodal(self):  # noqa: ANN001
     return True
@@ -252,6 +267,94 @@ async def test_store_documents_multimodal_image_source_does_not_duplicate(cheshi
     assert image_points[0].payload["metadata"]["image_file"] == "photo.jpeg"
     assert image_points[0].payload["metadata"]["source"] == "photo.jpeg"
     assert saved_files == []
+
+
+async def test_store_documents_skips_none_image_vectors(cheshire_cat, monkeypatch):
+    """A failed/skipped image embed (``None`` vector) must be dropped entirely:
+    its file is NOT saved and no point is stored for it. ``add_points_to_tenant``
+    must never receive a ``None``-vector point (Qdrant would reject it or store
+    payload-only garbage)."""
+    stored: dict = {}
+
+    async def fake_add_points(collection_name, points):
+        stored["collection"] = collection_name
+        stored["points"] = points
+
+    async def fake_embedder():
+        return PartialFailMultimodalEmbedder()
+
+    saved_files: list = []
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        saved_files.append((file_bytes, content_type, source, chat_id))
+
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
+    monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    docs = [Document(page_content="a text chunk", metadata={})]
+    # first image fails to embed (None), second succeeds
+    images = [_image_payload(b"IMG_FAIL"), _image_payload(b"IMG_OK")]
+
+    points = await rabbit_hole.store_documents(
+        docs=docs, source="test.txt", file_hash="hash", metadata={}, images=images,
+    )
+
+    # exactly ONE image point: the failed image is dropped
+    image_points = [p for p in points if p.payload["metadata"].get("image")]
+    assert len(image_points) == 1
+    assert image_points[0].payload["metadata"]["image_file"].startswith("test_img_1_")
+
+    # the failed image's file was NOT saved (only the successful one)
+    assert len(saved_files) == 1
+    assert saved_files[0][2].startswith("test_img_1_")
+
+    # add_points_to_tenant received no None-vector point
+    assert all(p.vector is not None for p in stored["points"])
+
+
+async def test_store_documents_whole_image_none_embed_skipped(cheshire_cat, monkeypatch):
+    """Whole-image source: if ``embed_images`` returns ``[None]`` (failed embed),
+    no image point is stored and no file is saved."""
+    stored: dict = {}
+
+    async def fake_add_points(collection_name, points):
+        stored["points"] = points
+
+    saved_files: list = []
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        saved_files.append((file_bytes, content_type, source, chat_id))
+
+    async def fake_embedder():
+        return PartialFailMultimodalEmbedder()
+
+    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
+    monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    docs = [Document(page_content="")]
+    source_bytes = b"\xff\xd8\xff\xe0" + b"\x00" * 16  # fake jpeg payload
+
+    points = await rabbit_hole.store_documents(
+        docs=docs, source="photo.jpeg", metadata={}, images=[_image_payload(b"crop")], source_bytes=source_bytes,
+    )
+
+    # the failed whole-image embed produces no image point and no saved file
+    image_points = [p for p in points if p.payload["metadata"].get("image")]
+    assert image_points == []
+    assert saved_files == []
+    assert all(p.vector is not None for p in stored["points"])
 
 
 async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatch):

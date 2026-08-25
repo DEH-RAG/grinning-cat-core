@@ -465,13 +465,17 @@ class RabbitHole:
                 # point (image_file = the source, no derived file) and ignore crops.
                 whole_image = source_bytes if source_bytes is not None else (images[0]["image_bytes"] if images else None)
                 embeds = await asyncio.to_thread(lambda: embedder.embed_images([whole_image])) if whole_image is not None else []
-                files_and_vectors = [(source, embeds[0])] if embeds else []
+                files_and_vectors = [(source, embeds[0])] if embeds and embeds[0] is not None else []
             else:
                 image_vectors = await asyncio.to_thread(
                     lambda: embedder.embed_images([img["image_bytes"] for img in images])
                 )
                 files_and_vectors = []
                 for idx, (img, vector) in enumerate(zip(images, image_vectors)):
+                    if vector is None:
+                        # A failed/skipped image embed (None placeholder) is dropped
+                        # entirely: neither saved as a file nor stored as a point.
+                        continue
                     image_file = self._image_file_name(source, idx, img["image_mime_type"], img["image_bytes"])
                     await self.cat.save_file(img["image_bytes"], img["image_mime_type"], image_file, chat_id)
                     files_and_vectors.append((image_file, vector))
