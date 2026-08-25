@@ -699,6 +699,46 @@ async def test_ingest_file_saves_file_before_parsing(cheshire_cat, monkeypatch):
     assert saved_files == [(b"hello world", "text/plain", "hello.txt", None)]
 
 
+async def test_ingest_file_sets_processing_before_parse(cheshire_cat, monkeypatch):
+    """The ``processing`` status is recorded BEFORE the parser runs.
+
+    ``ingest_file`` must fire ``rabbithole_ingestion_processing`` after the
+    file is persisted (``save_file``) and before ``_parse_to_docs``, so a long
+    parse is visible as ``processing`` (and the heartbeat keeps it fresh).
+    """
+    order: list = []
+
+    async def fake_save_file(file_bytes, content_type, source, chat_id=None):
+        order.append("save_file")
+
+    async def fake_parse_to_docs(self, source, file_bytes, content_type=None):
+        order.append("parse")
+        return [Document(page_content="x")], []
+
+    async def fake_store_documents(self, docs, source, file_hash=None, metadata=None, images=None, source_bytes=None):
+        return []
+
+    async def fake_execute_hook(hook_name, *args, **kwargs):
+        if hook_name == "rabbithole_ingestion_processing":
+            order.append("processing")
+
+    monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
+    monkeypatch.setattr(RabbitHole, "_parse_to_docs", fake_parse_to_docs)
+    monkeypatch.setattr(RabbitHole, "store_documents", fake_store_documents)
+    monkeypatch.setattr(cheshire_cat.plugin_manager, "execute_hook", fake_execute_hook)
+
+    rabbit_hole = RabbitHole()
+    rabbit_hole.cat = cheshire_cat
+    rabbit_hole.stray = None
+
+    await rabbit_hole.ingest_file(
+        cat=cheshire_cat, file=BytesIO(b"hello world"), metadata={}, filename="hello.txt", content_type="text/plain",
+    )
+
+    # processing fires after the file is persisted but before the parser runs
+    assert order == ["save_file", "processing", "parse"]
+
+
 async def test_ingest_file_survives_restart_via_resume(cheshire_cat, monkeypatch):
     """F3: a container restart during a large-file parse does not lose the file.
 
