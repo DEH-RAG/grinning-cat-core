@@ -7,17 +7,57 @@ import os
 import re
 import time
 import uuid
+from contextlib import asynccontextmanager
 from io import BytesIO
 from typing import List, Dict, Tuple
 from httpx import AsyncClient
 from langchain_community.document_loaders.parsers.generic import MimeTypeBasedParser
 from langchain_core.documents.base import Document, Blob
 
+from cat.env import get_env_int
 from cat.log import log
 from cat.services.factory.chunker import BaseChunker
 from cat.services.memory.models import VectorMemoryType, PointStruct
 from cat.services.service_factory import ServiceFactory
 from cat.utils import is_url as fnc_is_url
+
+
+# Process-wide semaphore bounding concurrent ``ingest_file`` executions.
+# Created lazily on first use; the size is read at runtime from
+# ``CAT_INGESTION_MAX_CONCURRENCY`` (``None`` or ``<= 0`` means unlimited).
+_ingestion_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_ingestion_semaphore() -> asyncio.Semaphore | None:
+    """Return the process-wide ingestion semaphore, creating it on first use.
+
+    The concurrency limit is read at runtime from ``CAT_INGESTION_MAX_CONCURRENCY``
+    and the semaphore is then cached for the process lifetime. ``None`` or
+    ``<= 0`` means unlimited: no semaphore is created and callers must NOT
+    acquire (previous behavior is preserved).
+    """
+    global _ingestion_semaphore
+    if _ingestion_semaphore is None:
+        max_concurrency = get_env_int("CAT_INGESTION_MAX_CONCURRENCY")
+        if max_concurrency is None or max_concurrency <= 0:
+            return None
+        _ingestion_semaphore = asyncio.Semaphore(max_concurrency)
+    return _ingestion_semaphore
+
+
+@asynccontextmanager
+async def _ingestion_guard(semaphore: asyncio.Semaphore | None):
+    """Async context manager bounding a body to ``semaphore``; no-op when unlimited.
+
+    Using ``async with`` guarantees the semaphore is released on every exit path
+    (success, exception, and the enclosing ``finally``). When ``semaphore`` is
+    ``None`` the body runs unconstrained (no acquire).
+    """
+    if semaphore is None:
+        yield
+    else:
+        async with semaphore:
+            yield
 
 
 class RabbitHole:
@@ -154,39 +194,44 @@ class RabbitHole:
                 caller=self.stray or self.cat,
             )
 
-            # split a file into a list of docs
-            source, file_bytes, content_type, docs, images, is_url = await self._file_to_docs(
-                file=file, filename=filename, content_type=content_type
-            )
+            # bound the heavy ingestion body (parse -> embed -> store -> notify)
+            # to CAT_INGESTION_MAX_CONCURRENCY process-wide; None/<=0 = unlimited.
+            # setup() and the ingestion_start hook above run unconstrained so
+            # status hooks are always visible.
+            async with _ingestion_guard(_get_ingestion_semaphore()):
+                # split a file into a list of docs
+                source, file_bytes, content_type, docs, images, is_url = await self._file_to_docs(
+                    file=file, filename=filename, content_type=content_type
+                )
 
-            if not docs:
-                raise Exception(f"No valid chunks found in the file '{filename}'.")
+                if not docs:
+                    raise Exception(f"No valid chunks found in the file '{filename}'.")
 
-            # fire the hook with the resolved source before the docs are embedded/stored
-            await self.cat.plugin_manager.execute_hook(
-                "rabbithole_ingestion_processing", source, caller=self.stray or self.cat,
-            )
+                # fire the hook with the resolved source before the docs are embedded/stored
+                await self.cat.plugin_manager.execute_hook(
+                    "rabbithole_ingestion_processing", source, caller=self.stray or self.cat,
+                )
 
-            # store in memory
-            sha256 = hashlib.sha256()
-            sha256.update(file_bytes)
-            points = await self.store_documents(
-                docs=docs, source=source, file_hash=sha256.hexdigest(), metadata=metadata, images=images,
-                source_bytes=file_bytes,
-            )
+                # store in memory
+                sha256 = hashlib.sha256()
+                sha256.update(file_bytes)
+                points = await self.store_documents(
+                    docs=docs, source=source, file_hash=sha256.hexdigest(), metadata=metadata, images=images,
+                    source_bytes=file_bytes,
+                )
 
-            # store in file storage
-            if store_file and not is_url:
-                chat_id = self.stray.id if self.stray else None
-                await self.cat.save_file(file_bytes, content_type, source, chat_id)
+                # store in file storage
+                if store_file and not is_url:
+                    chat_id = self.stray.id if self.stray else None
+                    await self.cat.save_file(file_bytes, content_type, source, chat_id)
 
-            # notify client
-            images_info = f" and {len(images)} images" if images else ""
-            await self._send_notification_message(
-                f"Finished reading {source}, I made {len(docs)} thoughts{images_info} on it."
-            )
+                # notify client
+                images_info = f" and {len(images)} images" if images else ""
+                await self._send_notification_message(
+                    f"Finished reading {source}, I made {len(docs)} thoughts{images_info} on it."
+                )
 
-            log.info(f"Agent id: {self.cat.agent_key}. Successfully ingested file: {filename}")
+                log.info(f"Agent id: {self.cat.agent_key}. Successfully ingested file: {filename}")
         except Exception as e:
             log.error(f"Error ingesting file {filename}: {e}")
             # Don't raise in background tasks - just log the error
@@ -279,10 +324,13 @@ class RabbitHole:
         fh = await self.cat.file_handlers()
         log.debug(f"Attempting to parse source: {source}. Detected MIME type: {content_type}. Available handlers: {list(fh.keys())}")
 
-        # Load the bytes in the Blob schema and parse the content. Parser based on the mime type
+        # Load the bytes in the Blob schema and parse the content. Parser based on the mime type.
+        # The parser is CPU/IO-bound (e.g. PyMuPDF on a large PDF): run it off the event loop.
         await self._send_notification_message("I'm parsing the content. Big content could require some minutes...")
-        super_docs = MimeTypeBasedParser(handlers=fh).parse(
-            Blob(data=file_bytes, mimetype=content_type).from_data(data=file_bytes, mime_type=content_type, path=source)
+        super_docs = await asyncio.to_thread(
+            lambda: MimeTypeBasedParser(handlers=fh).parse(
+                Blob(data=file_bytes, mimetype=content_type).from_data(data=file_bytes, mime_type=content_type, path=source)
+            )
         )
 
         # Propagate the source to every parsed document BEFORE chunking, so that
