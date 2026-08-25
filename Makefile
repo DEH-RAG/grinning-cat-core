@@ -80,4 +80,9 @@ update-requirements:
 	# existing output file's pins as preferences and never tracks the new lock.
 	uv pip compile --upgrade --python-version 3.13 --extra plugins -o requirements-full.txt pyproject.toml
 	uv pip compile --upgrade -o requirements.txt pyproject.toml
+	# Model-prerequisites fragment: keep spacy+nltk pinnable standalone (early,
+	# cacheable model/nltk download in the image build).
+	@printf 'nltk==%s\nspacy==%s\n' \
+		"$$(grep -m1 '^nltk==' requirements-full.txt | cut -d= -f3)" \
+		"$$(grep -m1 '^spacy==' requirements-full.txt | cut -d= -f3)" > requirements-models.txt
 

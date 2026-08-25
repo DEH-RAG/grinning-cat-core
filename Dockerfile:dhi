@@ -53,22 +53,29 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Manifests first, to leverage layer caching (rebuilt only when deps change)
-COPY pyproject.toml uv.lock ./
+COPY pyproject.toml uv.lock requirements-models.txt ./
 COPY ./cat/core_plugins ./cat/core_plugins
 COPY ./scripts/hash_plugin_requirements.py ./scripts/hash_plugin_requirements.py
 
-# Deterministic single-pass install of core + all plugin extras
+# 1) Early, cacheable model layer: create the venv, install ONLY the pinned
+#    spacy+nltk, then pre-download the spaCy models and NLTK data. This layers
+#    rebuild only when requirements-models.txt changes (not on every dep bump),
+#    so the heavy downloads are reused across builds.
+# NLTK data stays under /app/nltk_data (survives the non-root switch) and egress
+# uses the trusted build proxy (NLTK_ALLOW_PROXIED_URLOPEN=1).
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv venv --seed .venv && \
-    uv sync --frozen --no-install-project --no-dev --extra plugins && \
-    python3 scripts/hash_plugin_requirements.py
-
-# Pre-download spaCy models and NLTK data at build time (no runtime downloads).
-# NLTK data is pinned to /app/nltk_data so it stays valid for the non-root user.
-RUN spacy download it_core_news_lg && \
+    uv pip install --python .venv -r requirements-models.txt && \
+    spacy download it_core_news_lg && \
     spacy download en_core_web_lg && \
     spacy download en_core_web_sm && \
     python -m nltk.downloader -d /app/nltk_data punkt averaged_perceptron_tagger
+
+# 2) Full deterministic install of core + all plugin extras (spacy+nltk and the
+# model data are already present and match the lock, so this step is clean).
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project --no-dev --extra plugins && \
+    python3 scripts/hash_plugin_requirements.py
 
 # Remove build-time caches
 RUN rm -rf /root/.cache /tmp/* /var/tmp/*
