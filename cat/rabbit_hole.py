@@ -200,10 +200,15 @@ class RabbitHole:
             # setup() and the ingestion_start hook above run unconstrained so
             # status hooks are always visible.
             async with _ingestion_guard(_get_ingestion_semaphore()):
-                # split a file into a list of docs
-                source, file_bytes, content_type, docs, images, is_url = await self._file_to_docs(
+                # resolve the source bytes BEFORE parsing so the file can be
+                # persisted to the file manager first: a container restart during
+                # a long parse no longer loses the uploaded file (the resume
+                # mechanism reads it back from disk).
+                source, file_bytes, content_type, is_url = await self._resolve_source_bytes(
                     file=file, filename=filename, content_type=content_type
                 )
+                if not file_bytes:
+                    raise ValueError(f"Something went wrong with the source '{source}'")
 
                 # store the file bytes in the agent's persistent storage as early as
                 # possible, so a container restart can resume reading the bytes from
@@ -212,6 +217,9 @@ class RabbitHole:
                 if store_file and not is_url:
                     chat_id = self.stray.id if self.stray else None
                     await self.cat.save_file(file_bytes, content_type, source, chat_id)
+
+                # split a file into a list of docs
+                docs, images = await self._parse_to_docs(source, file_bytes, content_type)
 
                 if not docs:
                     raise Exception(f"No valid chunks found in the file '{filename}'.")
@@ -274,6 +282,38 @@ class RabbitHole:
                 the list of images extracted by multimodal parsers (empty for text-only embedders) and
                 a boolean indicating if the file was loaded from a URL.
         """
+        source, file_bytes, content_type, is_url = await self._resolve_source_bytes(
+            file=file, filename=filename, content_type=content_type
+        )
+        if not file_bytes:
+            raise ValueError(f"Something went wrong with the source '{source}'")
+        docs, images = await self._parse_to_docs(source, file_bytes, content_type)
+        return source, file_bytes, content_type, docs, images, is_url  # type: ignore[return-value]
+
+    async def _resolve_source_bytes(
+        self, file: str | BytesIO, filename: str, content_type: str | None
+    ) -> Tuple[str | None, bytes | None, str | None, bool]:
+        """Resolve the source bytes of an incoming file WITHOUT parsing it.
+
+        This method takes a file either from a Python script, from the `/rabbithole/` or `/rabbithole/web` endpoints,
+        and resolves its source name, raw bytes and content type. It does NOT parse or chunk the content: that is
+        the responsibility of ``_parse_to_docs``. Resolving the bytes first allows ``ingest_file`` to persist the
+        file to the file manager before the (potentially long) parse step, so a container restart during ingestion
+        does not lose the uploaded file.
+
+        Args:
+            file (str | BytesIO): The file can be either a string path if loaded programmatically, a `BytesIO` if coming from the `/rabbithole/` endpoint, or a URL if coming from the `/rabbithole/web` endpoint.
+            filename (str): The filename of the file to be ingested.
+            content_type (str): The content type of the file. If not provided, it will be guessed based on the file extension.
+
+        Returns:
+            (source, file_bytes, content_type, is_url): Tuple[str | None, bytes | None, str | None, bool].
+                The file name, the file content in bytes, the content type and a boolean indicating if the file
+                was loaded from a URL. On a failed URL download both ``source`` and ``file_bytes`` are ``None``.
+        """
+        if not isinstance(file, BytesIO) and not isinstance(file, str):
+            raise ValueError(f"{type(file)} is not a valid type.")
+
         def sanitize_filename(file_name: str) -> str:
             if "." not in file_name:
                 return file_name
@@ -284,47 +324,56 @@ class RabbitHole:
             base = re.sub(r"[.\s]+", "_", base)
             return base + ext
 
-        async def parse() -> Tuple[str | None, bytes | None, str | None, bool]:
-            if isinstance(file, BytesIO):
-                # Get the source of UploadFile, file bytes and whether it's a URL
-                return sanitize_filename(filename), file.read(), content_type, False
-            if fnc_is_url(file):
-                try:
-                    # notify plugins that the URL download is about to start
-                    await self.cat.plugin_manager.execute_hook(
-                        "rabbithole_url_downloading", file, filename, caller=self.stray or self.cat,
-                    )
-                    # Make a request with a fake browser name - use async httpx
-                    async with AsyncClient() as client:
-                        response = await client.get(file, headers={"User-Agent": "Magic Browser"})
-                        response.raise_for_status()
-                        # Define mime type and source of url
-                        # Add fallback for empty/None content_type
-                        ct = response.headers.get(
-                            "Content-Type", "text/html" if file.startswith("http") else "text/plain"
-                        ).split(";")[0]
-                        # Get binary content of url
-                        content = response.content
-                    # notify plugins that the URL download completed successfully
-                    await self.cat.plugin_manager.execute_hook(
-                        "rabbithole_url_download_completed", file, filename, caller=self.stray or self.cat,
-                    )
-                    return file, content, ct, True
-                except Exception as e:
-                    log.error(f"Agent id: {self.cat.agent_key}. Error: {e}")
-                    return None, None, content_type, True
-            # Get file bytes - use async file reading
-            fb = await asyncio.to_thread(lambda: open(file, "rb").read())  # type: ignore[union-attr]
-            return sanitize_filename(os.path.basename(file)), fb, mimetypes.guess_type(file)[0], False  # type: ignore[return-value]
+        if isinstance(file, BytesIO):
+            # Get the source of UploadFile, file bytes and whether it's a URL
+            return sanitize_filename(filename), file.read(), content_type, False
+        if fnc_is_url(file):
+            try:
+                # notify plugins that the URL download is about to start
+                await self.cat.plugin_manager.execute_hook(
+                    "rabbithole_url_downloading", file, filename, caller=self.stray or self.cat,
+                )
+                # Make a request with a fake browser name - use async httpx
+                async with AsyncClient() as client:
+                    response = await client.get(file, headers={"User-Agent": "Magic Browser"})
+                    response.raise_for_status()
+                    # Define mime type and source of url
+                    # Add fallback for empty/None content_type
+                    ct = response.headers.get(
+                        "Content-Type", "text/html" if file.startswith("http") else "text/plain"
+                    ).split(";")[0]
+                    # Get binary content of url
+                    content = response.content
+                # notify plugins that the URL download completed successfully
+                await self.cat.plugin_manager.execute_hook(
+                    "rabbithole_url_download_completed", file, filename, caller=self.stray or self.cat,
+                )
+                return file, content, ct, True
+            except Exception as e:
+                log.error(f"Agent id: {self.cat.agent_key}. Error: {e}")
+                return None, None, content_type, True
+        # Get file bytes - use async file reading
+        fb = await asyncio.to_thread(lambda: open(file, "rb").read())  # type: ignore[union-attr]
+        return sanitize_filename(os.path.basename(file)), fb, mimetypes.guess_type(file)[0], False  # type: ignore[return-value]
 
-        if not isinstance(file, BytesIO) and not isinstance(file, str):
-            raise ValueError(f"{type(file)} is not a valid type.")
+    async def _parse_to_docs(
+        self, source: str, file_bytes: bytes, content_type: str | None
+    ) -> Tuple[List[Document], List[Dict]]:
+        """Parse resolved source bytes into Langchain `Document` chunks.
 
-        # Check the characteristics of the incoming file.
-        source, file_bytes, content_type, is_url = await parse()
-        if not file_bytes:
-            raise ValueError(f"Something went wrong with the source '{source}'")
+        This method takes the source name and raw bytes resolved by ``_resolve_source_bytes``, parses the content
+        with the MIME-type based parser, propagates the source to every parsed document, collects the images
+        extracted by multimodal parsers (if a multimodal embedder is active) and splits the documents in chunks.
 
+        Args:
+            source (str): The source name of the file to be ingested.
+            file_bytes (bytes): The raw bytes of the file to be ingested.
+            content_type (str | None): The content type of the file.
+
+        Returns:
+            Tuple[List[Document], List[Dict]]: The list of chunked Langchain `Document` and the list of images
+                extracted by multimodal parsers (empty for text-only embedders).
+        """
         fh = await self.cat.file_handlers()
         log.debug(f"Attempting to parse source: {source}. Detected MIME type: {content_type}. Available handlers: {list(fh.keys())}")
 
@@ -362,7 +411,7 @@ class RabbitHole:
         # Split
         await self._send_notification_message("Parsing completed. Now let's go with reading process...")
         docs = await self._split_text(docs=super_docs)
-        return source, file_bytes, content_type, docs, images, is_url  # type: ignore[return-value]
+        return docs, images
 
     async def _is_multimodal_embedder(self) -> bool:
         """Check whether the active embedder supports multimodality.
