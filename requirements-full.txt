@@ -87,9 +87,9 @@ beautifulsoup4==4.15.0
     #   unstructured
 blis==1.3.3
     # via thinc
-boto3==1.43.77
+boto3==1.43.79
     # via grinning-cat (pyproject.toml)
-botocore==1.43.77
+botocore==1.43.79
     # via
     #   boto3
     #   s3transfer
@@ -136,7 +136,7 @@ click==8.4.2
     #   uvicorn
 click-log==0.4.0
     # via alphashape
-cloudpathlib==0.24.0
+cloudpathlib==0.25.0
     # via weasel
 cohere==5.21.1
     # via langchain-cohere
@@ -167,13 +167,13 @@ ctranslate2==4.8.1
     # via faster-whisper
 cuda-bindings==13.3.1
     # via torch
-cuda-pathfinder==1.6.1
+cuda-pathfinder==1.7.0
     # via cuda-bindings
 cuda-toolkit==13.0.3.0
     # via torch
 cycler==0.12.1
     # via matplotlib
-cyclopts==4.23.1
+cyclopts==4.23.2
     # via fastmcp-slim
 cymem==2.0.13
     # via
@@ -227,7 +227,7 @@ fastmcp-slim==3.4.0
     # via fastmcp
 fastuuid==0.14.0
     # via unclecode-litellm
-filelock==3.32.3
+filelock==3.32.4
     # via
     #   huggingface-hub
     #   torch
@@ -250,7 +250,7 @@ fsspec==2026.7.0
     # via
     #   huggingface-hub
     #   torch
-google-api-core==2.34.0
+google-api-core==2.35.0
     # via
     #   google-api-python-client
     #   google-cloud-core
@@ -260,9 +260,9 @@ google-api-python-client==2.199.0
     # via
     #   grinning-cat (pyproject.toml)
     #   google-api-python-client-stubs
-google-api-python-client-stubs==1.39.0
+google-api-python-client-stubs==1.40.0
     # via grinning-cat (pyproject.toml)
-google-auth==2.56.3
+google-auth==2.57.0
     # via
     #   google-api-core
     #   google-api-python-client
@@ -272,13 +272,13 @@ google-auth==2.56.3
     #   google-cloud-storage
     #   google-cloud-vision
     #   google-genai
-google-auth-httplib2==0.4.1
+google-auth-httplib2==0.4.2
     # via
     #   grinning-cat (pyproject.toml)
     #   google-api-python-client
-google-auth-oauthlib==1.4.0
+google-auth-oauthlib==1.4.1
     # via grinning-cat (pyproject.toml)
-google-cloud-core==2.6.1
+google-cloud-core==2.7.0
     # via google-cloud-storage
 google-cloud-storage==3.13.1
     # via grinning-cat (pyproject.toml)
@@ -316,7 +316,7 @@ grpcio==1.78.0
     #   weaviate-client
 grpcio-status==1.78.0
     # via google-api-core
-gunicorn==26.1.0
+gunicorn==26.2.0
     # via grinning-cat (pyproject.toml)
 h11==0.16.0
     # via
@@ -457,7 +457,7 @@ keyring==25.7.0
     # via py-key-value-aio
 kiwisolver==1.5.0
     # via matplotlib
-langchain==1.3.16
+langchain==1.3.17
     # via grinning-cat (pyproject.toml)
 langchain-anthropic==1.6.1
     # via grinning-cat (pyproject.toml)
@@ -562,7 +562,7 @@ matplotlib==3.11.1
     # via unstructured-inference
 mccabe==0.7.0
     # via pylint
-mcp==1.29.0
+mcp==1.29.1
     # via fastmcp-slim
 mdurl==0.1.2
     # via markdown-it-py
@@ -773,7 +773,7 @@ pillow==12.3.0
     #   torchvision
     #   unstructured-pytesseract
     #   voyageai
-platformdirs==4.11.3
+platformdirs==4.11.4
     # via
     #   fastmcp-slim
     #   pylint
@@ -907,7 +907,7 @@ pyparsing==3.3.2
     # via
     #   httplib2
     #   matplotlib
-pypdf==6.16.1
+pypdf==6.16.2
     # via
     #   crawl4ai
     #   unstructured
@@ -1058,7 +1058,7 @@ scikit-learn==1.9.0
     # via
     #   grinning-cat (pyproject.toml)
     #   sentence-transformers
-scipy==1.18.0
+scipy==1.18.1
     # via
     #   alphashape
     #   scikit-learn
@@ -1099,7 +1099,7 @@ snowballstemmer==2.2.0
     # via crawl4ai
 soupsieve==2.9.2
     # via beautifulsoup4
-spacy==3.8.15
+spacy==3.8.16
     # via
     #   grinning-cat (pyproject.toml)
     #   spacy-transformers
@@ -1226,7 +1226,6 @@ typing-extensions==4.16.0
     #   cohere
     #   fastapi
     #   fastmcp-slim
-    #   google-api-python-client-stubs
     #   google-genai
     #   groq
     #   grpcio
@@ -1263,7 +1262,7 @@ unclecode-litellm==1.81.13
     # via crawl4ai
 unstructured==0.22.18
     # via grinning-cat (pyproject.toml)
-unstructured-client==0.46.1
+unstructured-client==0.46.2
     # via
     #   langchain-unstructured
     #   unstructured
