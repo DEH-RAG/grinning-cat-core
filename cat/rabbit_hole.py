@@ -204,6 +204,14 @@ class RabbitHole:
                     file=file, filename=filename, content_type=content_type
                 )
 
+                # store the file bytes in the agent's persistent storage as early as
+                # possible, so a container restart can resume reading the bytes from
+                # disk even if processing/embedding is interrupted. LocalFileManager
+                # overwrites an existing destination, so this is idempotent.
+                if store_file and not is_url:
+                    chat_id = self.stray.id if self.stray else None
+                    await self.cat.save_file(file_bytes, content_type, source, chat_id)
+
                 if not docs:
                     raise Exception(f"No valid chunks found in the file '{filename}'.")
 
@@ -219,11 +227,6 @@ class RabbitHole:
                     docs=docs, source=source, file_hash=sha256.hexdigest(), metadata=metadata, images=images,
                     source_bytes=file_bytes,
                 )
-
-                # store in file storage
-                if store_file and not is_url:
-                    chat_id = self.stray.id if self.stray else None
-                    await self.cat.save_file(file_bytes, content_type, source, chat_id)
 
                 # notify client
                 images_info = f" and {len(images)} images" if images else ""
