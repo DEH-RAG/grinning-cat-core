@@ -1,4 +1,4 @@
-"""Startup resume + periodic GC sweep for the ``ingestion_status`` core plugin.
+"""Startup + periodic resume and GC sweep for the ``ingestion_status`` core plugin.
 
 The ``after_lizard_bootstrap`` hook schedules a fire-and-forget background pass
 (per agent) that:
@@ -9,6 +9,11 @@ The ``after_lizard_bootstrap`` hook schedules a fire-and-forget background pass
   (b) purges status entries whose source is absent from the canonical lists
       (files on disk, URLs in the vector store, existing conversations) via the
       shared :func:`reconcile_agent` helper.
+
+The same pass is then re-run periodically (every
+``CAT_INGESTION_RESUME_INTERVAL_SECONDS``, default 60) so a stale
+``uploaded``/``processing`` entry is recovered without a manual restart; set
+the interval to ``0`` to disable the periodic sweep.
 
 Both are guarded by a distributed lock and never crash lizard bootstrap.
 """
@@ -209,7 +214,26 @@ async def _startup_pass(lizard: BillTheLizard) -> None:
         await _pass_for_agent(lizard, agent_id)
 
 
+async def _periodic_sweep_loop(lizard: BillTheLizard) -> None:
+    """Re-run the resume + GC pass every ``CAT_INGESTION_RESUME_INTERVAL_SECONDS``.
+
+    Fire-and-forget: never blocks bootstrap. Each pass is safe against
+    double-processing across replicas because ``_pass_for_agent`` is guarded by
+    a per-agent distributed lock and each source claim by
+    ``claim_source_for_resume``.
+    """
+    interval = get_env_int("CAT_INGESTION_RESUME_INTERVAL_SECONDS")
+    if interval is None or interval <= 0:
+        return
+    while True:
+        await _startup_pass(lizard)
+        await asyncio.sleep(interval)
+
+
 @hook
 async def after_lizard_bootstrap(lizard: BillTheLizard):
     """Schedule the fire-and-forget startup pass (never blocks bootstrap)."""
     asyncio.ensure_future(_startup_pass(lizard))
+    interval = get_env_int("CAT_INGESTION_RESUME_INTERVAL_SECONDS")
+    if interval is not None and interval > 0:
+        asyncio.ensure_future(_periodic_sweep_loop(lizard))
