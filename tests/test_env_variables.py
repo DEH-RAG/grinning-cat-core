@@ -32,3 +32,13 @@ def test_get_env_int_ingestion_max_concurrency():
     os.environ["CAT_INGESTION_MAX_CONCURRENCY"] = "5"
     assert get_env_int("CAT_INGESTION_MAX_CONCURRENCY") == 5
     del os.environ["CAT_INGESTION_MAX_CONCURRENCY"]
+
+
+def test_get_env_int_ingestion_workers():
+    # default value is 2
+    assert get_env_int("CAT_INGESTION_WORKERS") == 2
+
+    # explicit env override is honored
+    os.environ["CAT_INGESTION_WORKERS"] = "5"
+    assert get_env_int("CAT_INGESTION_WORKERS") == 5
+    del os.environ["CAT_INGESTION_WORKERS"]
