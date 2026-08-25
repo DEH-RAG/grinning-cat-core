@@ -518,3 +518,42 @@ async def test_resume_does_not_mark_url_error(cheshire_cat, monkeypatch):
     doc = await get_status(agent_key, "agent", "https://example.com/doc.pdf")
     assert doc is not None
     assert doc["status"] != "error"
+
+
+async def test_resume_completes_stale_uploaded_when_file_on_disk(cheshire_cat, monkeypatch):
+    """A stale ``uploaded`` entry whose file is on disk is resumed to ``completed``."""
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "on_disk.pdf"), {
+        "source": "on_disk.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": "uploaded",
+        "error": None,
+        "error_at": None,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    # the file is present on disk
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda source, remote: b"content")
+
+    calls = []
+
+    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
+        calls.append((cat, file, filename))
+        await ingestion_plugin.after_rabbithole_stored_documents.function(filename, [object()], cat)
+
+    monkeypatch.setattr(lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+
+    await resume._resume_agent(lizard, agent_key)
+
+    assert len(calls) == 1
+    assert calls[0][2] == "on_disk.pdf"
+    doc = await get_status(agent_key, "agent", "on_disk.pdf")
+    assert doc is not None
+    assert doc["status"] == "completed"
