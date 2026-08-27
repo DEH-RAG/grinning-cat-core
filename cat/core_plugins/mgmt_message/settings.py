@@ -1,5 +1,4 @@
-from datetime import datetime, timezone
-from typing import Dict, List
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -20,7 +19,7 @@ _MGMT_SETTING_NAME = "mgmt-message"
 
 
 @plugin
-def settings_schema() -> Dict:
+def settings_schema() -> dict:
     return PluginSettings.model_json_schema()
 
 
@@ -30,7 +29,7 @@ def settings_model():
 
 
 @plugin
-def load_settings(plugin_id: str, agent_id: str) -> Dict:
+def load_settings(plugin_id: str, agent_id: str) -> dict:
     db = get_sync_db()
     key = f"{DEFAULT_SYSTEM_KEY}:{DEFAULT_AGENT_KEY}"
     # read the setting by name from the JSON list
@@ -45,14 +44,14 @@ def load_settings(plugin_id: str, agent_id: str) -> Dict:
 
 
 @plugin
-def save_settings(plugin_id: str, settings: Dict, agent_id: str) -> Dict:
+def save_settings(plugin_id: str, settings: dict, agent_id: str) -> dict:
     # validate against the model
     validated = PluginSettings(**settings).model_dump()
     db = get_sync_db()
     key = f"{DEFAULT_SYSTEM_KEY}:{DEFAULT_AGENT_KEY}"
     # read the full list
     full = db.json().get(key, "$")
-    settings_list: List = []
+    settings_list: list = []
     if isinstance(full, list) and full and isinstance(full[0], list):
         settings_list = full[0]
     # find existing entry by name
@@ -61,7 +60,7 @@ def save_settings(plugin_id: str, settings: Dict, agent_id: str) -> Dict:
         "value": validated,
         "category": None,
         "setting_id": str(uuid4()),
-        "updated_at": datetime.now(timezone.utc).timestamp(),
+        "updated_at": datetime.now(UTC).timestamp(),
     }
     replaced = False
     for i, entry in enumerate(settings_list):

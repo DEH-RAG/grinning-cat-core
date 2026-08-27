@@ -4,7 +4,12 @@ import pytest
 from fastapi import WebSocketException
 
 from cat.auth.connection import AuthorizedInfo, HTTPAuth, WebSocketAuth
-from cat.auth.permissions import AuthPermission, AuthResource, AuthUserInfo, get_base_permissions
+from cat.auth.permissions import (
+    AuthPermission,
+    AuthResource,
+    AuthUserInfo,
+    get_base_permissions,
+)
 from cat.exceptions import CustomForbiddenException
 
 
