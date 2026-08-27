@@ -83,6 +83,16 @@ class ConnectionAuth(ABC):
         if user and user.permissions is None:
             self._not_allowed(connection)
 
+        # management gate: let plugins decide whether this request is allowed
+        if "auth_request" in lizard.plugin_manager.hooks:
+            auth_res = await lizard.plugin_manager.execute_hook(
+                "auth_request", user, agent_id, connection, caller=lizard
+            )
+            if isinstance(auth_res, str) and auth_res:
+                if connection.scope.get("type") == "websocket":
+                    raise WebSocketException(code=1008, reason=auth_res)
+                raise CustomForbiddenException(auth_res)
+
         if ccat is not None and (chat_id := extract_chat_id_from_request(connection)):
             stray_cat = await StrayCat.from_cat(user_data=user, cat=ccat, stray_id=chat_id)  # type: ignore[arg-type]
 
