@@ -291,3 +291,24 @@ async def test_auth_request_noop_when_no_setting(monkeypatch):
     result = await auth_request.function(_make_user(), "local", None)
 
     assert result is None
+
+
+async def test_public_global_message_endpoint_no_auth(client, secure_client, secure_client_headers, cheshire_cat):
+    # activate the plugin so its custom endpoint is registered
+    await secure_client.put("/plugins/toggle/mgmt_message", headers=secure_client_headers)
+
+    payload = {
+        "management_message": "Sistema in manutenzione",
+        "management_active": False,
+        "global_message": "Avviso globale",
+        "show_global_msg": True,
+    }
+    await _store(payload)
+
+    # unauthenticated client (no headers) must still reach the endpoint
+    response = await client.get("/mgmt_message/global_message")
+
+    assert response.status_code == 200
+    assert response.json() == payload
+
+    await _cleanup()
