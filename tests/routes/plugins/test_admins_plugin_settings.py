@@ -1,6 +1,6 @@
-from tests.utils import just_installed_plugin
-from tests.mocks.mock_plugin.mock_plugin_overrides import MockPluginSettings
 from cat.core_plugins.mgmt_message.settings import PluginSettings
+from tests.mocks.mock_plugin.mock_plugin_overrides import MockPluginSettings
+from tests.utils import just_installed_plugin
 
 
 # endpoint to get settings and settings schema
@@ -28,7 +28,12 @@ async def test_get_all_plugin_settings(lizard, secure_client, secure_client_head
         elif setting["name"] == "white_rabbit":
             assert setting["value"] == {"embed_procedures_every_n_days": 7}
         elif setting["name"] == "mgmt_message":
-            assert setting["value"] == {}
+            assert setting["value"] == {
+                "management_message": "",
+                "management_active": False,
+                "global_message": "",
+                "show_global_msg": False,
+            }
             assert setting["scheme"] == PluginSettings.model_json_schema()
         else:
             assert setting["value"] == {}
@@ -57,3 +62,80 @@ async def test_get_plugin_settings(secure_client, secure_client_headers, cheshir
     assert response_json["name"] == "mock_plugin"
     assert response_json["value"] == {"a": "a", "b": 0}
     assert response_json["scheme"] == MockPluginSettings.model_json_schema()
+
+
+# endpoint to upsert settings at a system level
+async def test_put_plugin_settings(secure_client, secure_client_headers, cheshire_cat):
+    await just_installed_plugin(secure_client, secure_client_headers)
+
+    response = await secure_client.put(
+        "/plugins/system/settings/mock_plugin",
+        headers=secure_client_headers,
+        json={"a": "a", "b": 1},
+    )
+    response_json = response.json()
+
+    assert response.status_code == 200
+    assert response_json["name"] == "mock_plugin"
+    assert response_json["value"] == {"a": "a", "b": 1}
+
+
+async def test_put_plugin_settings_non_existent(secure_client, secure_client_headers, cheshire_cat):
+    await just_installed_plugin(secure_client, secure_client_headers)
+
+    non_existent_plugin = "ghost_plugin"
+    response = await secure_client.put(
+        f"/plugins/system/settings/{non_existent_plugin}",
+        headers=secure_client_headers,
+        json={"a": "a", "b": 1},
+    )
+    json = response.json()
+
+    assert response.status_code == 404
+    assert "not found" in json["detail"]
+
+
+async def test_put_plugin_settings_invalid(secure_client, secure_client_headers, cheshire_cat):
+    await just_installed_plugin(secure_client, secure_client_headers)
+
+    # "b" expects an int -> ValidationError
+    response = await secure_client.put(
+        "/plugins/system/settings/mock_plugin",
+        headers=secure_client_headers,
+        json={"a": "a", "b": "not-an-int"},
+    )
+
+    assert response.status_code == 400
+
+
+# endpoint to reset settings at a system level
+async def test_post_reset_plugin_settings(secure_client, secure_client_headers, cheshire_cat):
+    await just_installed_plugin(secure_client, secure_client_headers)
+
+    # upsert a custom value first
+    await secure_client.put(
+        "/plugins/system/settings/mock_plugin",
+        headers=secure_client_headers,
+        json={"a": "custom", "b": 42},
+    )
+
+    response = await secure_client.post("/plugins/system/settings/mock_plugin", headers=secure_client_headers)
+    response_json = response.json()
+
+    assert response.status_code == 200
+    assert response_json["name"] == "mock_plugin"
+    # reset restores the factory settings
+    assert response_json["value"] == {"a": "a", "b": 0}
+
+
+async def test_post_reset_plugin_settings_non_existent(secure_client, secure_client_headers, cheshire_cat):
+    await just_installed_plugin(secure_client, secure_client_headers)
+
+    non_existent_plugin = "ghost_plugin"
+    response = await secure_client.post(
+        f"/plugins/system/settings/{non_existent_plugin}", headers=secure_client_headers
+    )
+    json = response.json()
+
+    assert response.status_code == 404
+    assert "not found" in json["detail"]

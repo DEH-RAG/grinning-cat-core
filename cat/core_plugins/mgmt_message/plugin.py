@@ -1,14 +1,15 @@
-from cat import hook
+from cat import hook, log
 from cat.auth.permissions import AuthResource
-from cat.db.cruds import settings as crud_settings
+from cat.db.cruds import plugins as crud_plugins
 from cat.db.database import DEFAULT_SYSTEM_KEY
-from cat import log
+
 
 @hook(priority=1)
 async def auth_request(local_user, agent_id, connection, **kwargs):
-    # read global settings
-    setting = await crud_settings.get_setting_by_name(DEFAULT_SYSTEM_KEY, "mgmt_message")
-    value = (setting or {}).get("value") or {}
+    # read global settings (stored under system:plugins:mgmt_message by the
+    # default plugin-settings mechanism, global for the system agent)
+    setting = await crud_plugins.get_setting(DEFAULT_SYSTEM_KEY, "mgmt_message")
+    value = setting or {}
     if not value.get("management_active", False):
         return None  # allow
 
