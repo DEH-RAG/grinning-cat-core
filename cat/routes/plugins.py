@@ -247,7 +247,11 @@ async def upsert_lizard_plugin_settings(
         raise CustomValidationException("\n".join(list(map(lambda x: x["msg"], e.errors()))))
 
     final_settings = await plugin.save_settings(payload, lizard.agent_key)  # type: ignore[union-attr]
-    await plugin_manager.execute_hook("after_plugin_settings_update", plugin_id, final_settings, caller=lizard)  # type: ignore[union-attr]
+    # NOTE: no `after_plugin_settings_update` hook here on purpose. That hook is
+    # agent-scoped (firma `(plugin_id, settings, cat)`); at system level the
+    # caller context is `lizard`, which breaks third-party hooks (e.g.
+    # cc_scrapycat) that do not accept it. System-level config changes
+    # (mgmt_message etc.) do not need per-agent notification.
 
     return GetSettingResponse(name=plugin_id, value=final_settings)
 
