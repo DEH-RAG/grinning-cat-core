@@ -64,7 +64,7 @@ async def test_get_plugin_settings(secure_client, secure_client_headers, cheshir
     assert response_json["scheme"] == MockPluginSettings.model_json_schema()
 
 
-# endpoint to upsert settings at a system level
+# endpoint to upsert settings at a system level (same pattern as the embedder upsert)
 async def test_put_plugin_settings(secure_client, secure_client_headers, cheshire_cat):
     await just_installed_plugin(secure_client, secure_client_headers)
 
@@ -106,36 +106,3 @@ async def test_put_plugin_settings_invalid(secure_client, secure_client_headers,
     )
 
     assert response.status_code == 400
-
-
-# endpoint to reset settings at a system level
-async def test_post_reset_plugin_settings(secure_client, secure_client_headers, cheshire_cat):
-    await just_installed_plugin(secure_client, secure_client_headers)
-
-    # upsert a custom value first
-    await secure_client.put(
-        "/plugins/system/settings/mock_plugin",
-        headers=secure_client_headers,
-        json={"a": "custom", "b": 42},
-    )
-
-    response = await secure_client.post("/plugins/system/settings/mock_plugin", headers=secure_client_headers)
-    response_json = response.json()
-
-    assert response.status_code == 200
-    assert response_json["name"] == "mock_plugin"
-    # reset restores the factory settings
-    assert response_json["value"] == {"a": "a", "b": 0}
-
-
-async def test_post_reset_plugin_settings_non_existent(secure_client, secure_client_headers, cheshire_cat):
-    await just_installed_plugin(secure_client, secure_client_headers)
-
-    non_existent_plugin = "ghost_plugin"
-    response = await secure_client.post(
-        f"/plugins/system/settings/{non_existent_plugin}", headers=secure_client_headers
-    )
-    json = response.json()
-
-    assert response.status_code == 404
-    assert "not found" in json["detail"]

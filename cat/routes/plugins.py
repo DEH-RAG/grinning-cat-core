@@ -223,6 +223,38 @@ async def get_lizard_plugin_settings(
     return await get_plugin_settings(plugin_manager, plugin_id, lizard.agent_key)   # type: ignore[arg-type]
 
 
+<<<<<<< Updated upstream
+=======
+@router.put("/system/settings/{plugin_id}", response_model=GetSettingResponse)
+async def upsert_lizard_plugin_settings(
+    plugin_id: str,
+    payload: Dict = Body({"setting_a": "some value", "setting_b": "another value"}),
+    info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.WRITE),
+) -> GetSettingResponse:
+    """Updates the settings of a specific plugin, at a system level (same pattern as the embedder settings upsert)"""
+    plugin_id = slugify(plugin_id, separator="_")
+
+    # access cat instance
+    lizard = info.lizard
+    plugin_manager = lizard.plugin_manager
+    if not plugin_manager.plugin_exists(plugin_id):
+        raise CustomNotFoundException("Plugin not found")
+
+    # Get the plugin object
+    plugin = plugin_manager.plugins[plugin_id]
+    try:
+        # Load the plugin settings Pydantic model, and validate the settings
+        plugin.settings_model().model_validate(payload)
+    except ValidationError as e:
+        raise CustomValidationException("\n".join(list(map(lambda x: x["msg"], e.errors()))))
+
+    final_settings = await plugin.save_settings(payload, lizard.agent_key)  # type: ignore[union-attr]
+    await plugin_manager.execute_hook("after_plugin_settings_update", plugin_id, final_settings, caller=lizard)  # type: ignore[union-attr]
+
+    return GetSettingResponse(name=plugin_id, value=final_settings)
+
+
+>>>>>>> Stashed changes
 @router.get("/system/details/{plugin_id}", response_model=GetPluginDetailsResponse)
 async def get_lizard_plugin_details(
     plugin_id: str,
