@@ -1,4 +1,4 @@
-from cat import hook, log
+from cat import hook
 from cat.auth.permissions import AuthResource
 from cat.db.cruds import settings as crud_settings
 from cat.db.database import DEFAULT_SYSTEM_KEY
@@ -19,7 +19,6 @@ async def auth_request(local_user, agent_id, connection, **kwargs):
     if str(AuthResource.SYSTEM) in permissions:
         return  # allow
 
-    log.info(f"MANAGEMENT MODE: Access negated to user {local_user}.")
     message = value.get("management_message", "Access denied")
     # a dedicated exception: keeps the 403 semantics for clients, lets the core
     # log this at INFO level and lets clients distinguish this gate from a
