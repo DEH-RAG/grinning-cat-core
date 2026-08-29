@@ -1,8 +1,9 @@
 """Integration tests for the ``mgmt_message`` core plugin.
 
 Coverage:
-(a) storage round-trip in the global ``system:plugins:mgmt_message`` key
-    (the default framework mechanism for the system agent — no overrides),
+(a) storage round-trip inside the global ``system:agent`` settings list
+    (entry ``mgmt_message`` with ``category="mgmt_message"`` — same mechanism
+    as the system-level embedder configuration, NOT ``system:plugins:*``),
 (b) the management gate: the real ``auth_request`` hook denies unprivileged
     principals when ``management_active`` is true, and the denial is translated
     by ``ConnectionAuth`` into ``CustomForbiddenException`` (HTTP) /
@@ -29,13 +30,18 @@ from cat.auth.permissions import (
     get_base_permissions,
 )
 from cat.core_plugins.mgmt_message.plugin import auth_request
-from cat.db.cruds import plugins as crud_plugins
-from cat.db.database import DEFAULT_PLUGINS_KEY, DEFAULT_SYSTEM_KEY, get_sync_db
+from cat.core_plugins.mgmt_message.settings import (
+    _MGMT_SETTING_CATEGORY,
+    _MGMT_SETTING_NAME,
+)
+from cat.db.cruds import settings as crud_settings
+from cat.db.database import DEFAULT_AGENT_KEY, DEFAULT_SYSTEM_KEY, get_sync_db
+from cat.db.models import Setting
 from cat.exceptions import CustomForbiddenException
 
-# the plugin id (folder name) and the global key where its settings live
+# the plugin id (folder name) and the global entry where its settings live
 PLUGIN_ID = "mgmt_message"
-MGMT_GLOBAL_KEY = f"{DEFAULT_SYSTEM_KEY}:{DEFAULT_PLUGINS_KEY}:{PLUGIN_ID}"
+MGMT_SYSTEM_AGENT_KEY = f"{DEFAULT_SYSTEM_KEY}:{DEFAULT_AGENT_KEY}"
 
 
 def _make_user():
@@ -52,18 +58,22 @@ def _make_admin_user():
 
 
 async def _store(payload: dict):
-    await crud_plugins.set_setting(DEFAULT_SYSTEM_KEY, PLUGIN_ID, payload)
+    await crud_settings.upsert_setting_by_name(
+        DEFAULT_SYSTEM_KEY,
+        Setting(name=_MGMT_SETTING_NAME, value=payload, category=_MGMT_SETTING_CATEGORY),
+    )
 
 
 async def _cleanup():
-    await crud_plugins.delete_setting(DEFAULT_SYSTEM_KEY, PLUGIN_ID)
+    db = get_sync_db()
+    db.json().delete(MGMT_SYSTEM_AGENT_KEY, f'$[?(@.name=="{_MGMT_SETTING_NAME}")]')
 
 
 # ---------------------------------------------------------------------------
-# (a) storage round-trip in the global system:plugins:mgmt_message key
+# (a) storage round-trip in the global system:agent settings list
 # ---------------------------------------------------------------------------
 
-async def test_storage_round_trip_in_system_plugins():
+async def test_storage_round_trip_in_system_agent():
     payload = {
         "management_message": "Sistema in manutenzione",
         "management_active": True,
@@ -73,15 +83,49 @@ async def test_storage_round_trip_in_system_plugins():
 
     await _store(payload)
 
-    loaded = await crud_plugins.get_setting(DEFAULT_SYSTEM_KEY, PLUGIN_ID)
-    assert loaded == payload
-
-    # the value is stored under the global system:plugins:<id> key, not an agents:* key
+    # stored inside system:agent under the mgmt_message entry
     db = get_sync_db()
-    assert db.exists(MGMT_GLOBAL_KEY) == 1
+    found = db.json().get(MGMT_SYSTEM_AGENT_KEY, f'$[?(@.name=="{_MGMT_SETTING_NAME}")]')
+    assert isinstance(found, list) and found
+    entry = found[0]
+    assert isinstance(entry, dict)
+    assert entry["value"] == payload
+    assert entry["category"] == _MGMT_SETTING_CATEGORY
 
+    # real async read path used by the hook
+    loaded = await crud_settings.get_setting_by_name(DEFAULT_SYSTEM_KEY, _MGMT_SETTING_NAME)
+    assert loaded["value"] == payload
+
+    # no system:plugins:* key is written
+    assert db.keys("system:plugins:*") == []
+    # and no per-agent keys either
     agent_keys = db.keys("agents:*")
     assert agent_keys == []
+
+    await _cleanup()
+
+
+async def test_legacy_key_migrated_on_load():
+    # seed the legacy system:plugins:mgmt_message key (old mechanism)
+    payload = {
+        "management_message": "Sistema in manutenzione",
+        "management_active": True,
+        "global_message": "Avviso globale",
+        "show_global_msg": True,
+    }
+    db = get_sync_db()
+    db.json().set(f"{DEFAULT_SYSTEM_KEY}:plugins:{PLUGIN_ID}", "$", payload)
+
+    from cat.core_plugins.mgmt_message.settings import load_settings
+
+    loaded = load_settings.function(PLUGIN_ID, DEFAULT_SYSTEM_KEY)
+    assert loaded == payload
+
+    # migrated into system:agent, legacy key removed
+    assert db.keys("system:plugins:*") == []
+    found = db.json().get(MGMT_SYSTEM_AGENT_KEY, f'$[?(@.name=="{_MGMT_SETTING_NAME}")]')
+    assert isinstance(found, list) and found
+    assert found[0]["value"] == payload
 
     await _cleanup()
 
@@ -92,25 +136,20 @@ async def test_storage_round_trip_in_system_plugins():
 
 async def test_auth_request_denies_unprivileged_when_active():
     message = "Sistema in manutenzione"
-
-    # store via the default framework mechanism, then let the real hook read
-    # the same value (no monkeypatching)
     await _store({"management_message": message, "management_active": True})
 
-    result = await auth_request.function(_make_user(), DEFAULT_SYSTEM_KEY, None)
+    result = await auth_request.function(_make_user(), "system", None)
 
     assert result == message
-
     await _cleanup()
 
 
 async def test_auth_request_allows_system_principal_when_active():
     await _store({"management_message": "Sistema in manutenzione", "management_active": True})
 
-    result = await auth_request.function(_make_admin_user(), DEFAULT_SYSTEM_KEY, None)
+    result = await auth_request.function(_make_admin_user(), "system", None)
 
     assert result is None
-
     await _cleanup()
 
 
@@ -179,10 +218,10 @@ def _make_lizard_with_real_hook(user):
 async def test_http_gateway_denial_with_real_hook(monkeypatch):
     message = "Sistema in manutenzione"
 
-    async def fake_get_setting(agent_id, plugin_id):
-        return {"management_active": True, "management_message": message}
+    async def fake_get_setting_by_name(key_id, name):
+        return {"value": {"management_active": True, "management_message": message}}
 
-    monkeypatch.setattr(crud_plugins, "get_setting", fake_get_setting)
+    monkeypatch.setattr(crud_settings, "get_setting_by_name", fake_get_setting_by_name)
 
     lizard = _make_lizard_with_real_hook(_make_user())
     connection = _make_connection(lizard, scope_type="http")
@@ -197,10 +236,10 @@ async def test_http_gateway_denial_with_real_hook(monkeypatch):
 async def test_websocket_gateway_denial_with_real_hook(monkeypatch):
     message = "Sistema in manutenzione"
 
-    async def fake_get_setting(agent_id, plugin_id):
-        return {"management_active": True, "management_message": message}
+    async def fake_get_setting_by_name(key_id, name):
+        return {"value": {"management_active": True, "management_message": message}}
 
-    monkeypatch.setattr(crud_plugins, "get_setting", fake_get_setting)
+    monkeypatch.setattr(crud_settings, "get_setting_by_name", fake_get_setting_by_name)
 
     lizard = _make_lizard_with_real_hook(_make_user())
     connection = _make_connection(lizard, scope_type="websocket")
@@ -214,10 +253,10 @@ async def test_websocket_gateway_denial_with_real_hook(monkeypatch):
 
 
 async def test_http_gateway_allows_system_principal_with_real_hook(monkeypatch):
-    async def fake_get_setting(agent_id, plugin_id):
-        return {"management_active": True, "management_message": "Sistema in manutenzione"}
+    async def fake_get_setting_by_name(key_id, name):
+        return {"value": {"management_active": True, "management_message": "Sistema in manutenzione"}}
 
-    monkeypatch.setattr(crud_plugins, "get_setting", fake_get_setting)
+    monkeypatch.setattr(crud_settings, "get_setting_by_name", fake_get_setting_by_name)
 
     admin = _make_admin_user()
     lizard = _make_lizard_with_real_hook(admin)
@@ -272,10 +311,10 @@ async def test_get_plugin_settings_normal_mode(secure_client, secure_client_head
 # ---------------------------------------------------------------------------
 
 async def test_auth_request_noop_when_inactive(monkeypatch):
-    async def fake_get_setting(agent_id, plugin_id):
-        return {"management_active": False, "management_message": "Sistema in manutenzione"}
+    async def fake_get_setting_by_name(key_id, name):
+        return {"value": {"management_active": False, "management_message": "Sistema in manutenzione"}}
 
-    monkeypatch.setattr(crud_plugins, "get_setting", fake_get_setting)
+    monkeypatch.setattr(crud_settings, "get_setting_by_name", fake_get_setting_by_name)
 
     result = await auth_request.function(_make_user(), "local", None)
 
@@ -283,15 +322,19 @@ async def test_auth_request_noop_when_inactive(monkeypatch):
 
 
 async def test_auth_request_noop_when_no_setting(monkeypatch):
-    async def fake_get_setting(agent_id, plugin_id):
+    async def fake_get_setting_by_name(key_id, name):
         return None
 
-    monkeypatch.setattr(crud_plugins, "get_setting", fake_get_setting)
+    monkeypatch.setattr(crud_settings, "get_setting_by_name", fake_get_setting_by_name)
 
     result = await auth_request.function(_make_user(), "local", None)
 
     assert result is None
 
+
+# ---------------------------------------------------------------------------
+# (e) public global_message endpoint
+# ---------------------------------------------------------------------------
 
 async def test_public_global_message_endpoint_no_auth(client, secure_client, secure_client_headers, cheshire_cat):
     # activate the plugin so its custom endpoint is registered
