@@ -5,7 +5,8 @@ Coverage:
     (entry ``mgmt_message`` with ``category="mgmt_message"`` — same mechanism
     as the system-level embedder configuration, NOT ``system:plugins:*``),
 (b) the management gate: the real ``auth_request`` hook denies unprivileged
-    principals when ``management_active`` is true, and the denial is translated
+    principals when ``management_active`` is true by raising
+    ``ManagementModeException`` (a ``CustomForbiddenException``), translated
     by ``ConnectionAuth`` into ``CustomForbiddenException`` (HTTP) /
     ``WebSocketException(code=1008)`` (WS),
 (c) ``GET /plugins/settings/mgmt_message`` returns the 4 settings in normal
@@ -37,7 +38,7 @@ from cat.core_plugins.mgmt_message.settings import (
 from cat.db.cruds import settings as crud_settings
 from cat.db.database import DEFAULT_AGENT_KEY, DEFAULT_SYSTEM_KEY, get_sync_db
 from cat.db.models import Setting
-from cat.exceptions import CustomForbiddenException
+from cat.exceptions import CustomForbiddenException, ManagementModeException
 from tests.utils import get_client_admin_headers
 
 # the plugin id (folder name) and the global entry where its settings live
@@ -139,9 +140,11 @@ async def test_auth_request_denies_unprivileged_when_active():
     message = "Sistema in manutenzione"
     await _store({"management_message": message, "management_active": True})
 
-    result = await auth_request.function(_make_user(), "system", None)
+    with pytest.raises(ManagementModeException) as exc_info:
+        await auth_request.function(_make_user(), "system", None)
 
-    assert result == message
+    assert exc_info.value.args[0] == message
+    assert isinstance(exc_info.value, CustomForbiddenException)  # still a 403
     await _cleanup()
 
 
