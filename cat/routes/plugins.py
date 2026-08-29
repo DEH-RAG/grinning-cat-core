@@ -229,7 +229,7 @@ async def upsert_lizard_plugin_settings(
     payload: Dict = Body({"setting_a": "some value", "setting_b": "another value"}),
     info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.WRITE),
 ) -> GetSettingResponse:
-    """Updates the settings of a specific plugin, at a system level"""
+    """Updates the settings of a specific plugin, at a system level (same pattern as the embedder settings upsert)"""
     plugin_id = slugify(plugin_id, separator="_")
 
     # access cat instance
@@ -247,34 +247,6 @@ async def upsert_lizard_plugin_settings(
         raise CustomValidationException("\n".join(list(map(lambda x: x["msg"], e.errors()))))
 
     final_settings = await plugin.save_settings(payload, lizard.agent_key)  # type: ignore[union-attr]
-    await plugin_manager.execute_hook("after_plugin_settings_update", plugin_id, final_settings, caller=lizard)  # type: ignore[union-attr]
-
-    return GetSettingResponse(name=plugin_id, value=final_settings)
-
-
-@router.post("/system/settings/{plugin_id}", response_model=GetSettingResponse)
-async def reset_lizard_plugin_settings(
-    plugin_id: str,
-    info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.WRITE),
-) -> GetSettingResponse:
-    """Resets the settings of a specific plugin, at a system level"""
-    plugin_id = slugify(plugin_id, separator="_")
-
-    # access cat instance
-    lizard = info.lizard
-    plugin_manager = lizard.plugin_manager
-    if not plugin_manager.plugin_exists(plugin_id):
-        raise CustomNotFoundException("Plugin not found")
-
-    # factory settings come from the Pydantic model defaults (the system-level
-    # settings key holds the current values, which may have been overwritten)
-    plugin = plugin_manager.plugins[plugin_id]
-    try:
-        factory_settings = plugin.settings_model()().model_dump()
-    except ValidationError:
-        raise CustomNotFoundException("Plugin not found.")
-
-    final_settings = await plugin.save_settings(factory_settings, lizard.agent_key)  # type: ignore[union-attr]
     await plugin_manager.execute_hook("after_plugin_settings_update", plugin_id, final_settings, caller=lizard)  # type: ignore[union-attr]
 
     return GetSettingResponse(name=plugin_id, value=final_settings)

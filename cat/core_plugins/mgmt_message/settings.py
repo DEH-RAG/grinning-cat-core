@@ -3,7 +3,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 
-from cat import plugin
+from cat import log, plugin
 from cat.db.database import DEFAULT_AGENT_KEY, DEFAULT_SYSTEM_KEY, get_sync_db
 
 # entry name under which this plugin persists its settings in the global
@@ -37,11 +37,15 @@ def _system_agent_key() -> str:
     return f"{DEFAULT_SYSTEM_KEY}:{DEFAULT_AGENT_KEY}"
 
 
-def _write_entry(db, validated: dict) -> None:
-    """Upsert the plugin entry in the ``system:agent`` settings list."""
+def _upsert_entry(db, validated: dict) -> None:
+    """Upsert the plugin entry in the ``system:agent`` settings list.
+
+    Mirrors ``crud_settings.upsert_setting_by_category`` (same storage, same
+    ``category`` semantics) so the plugin's system:agent entry is byte-identical
+    in shape to the one the embedder configuration produces.
+    """
     key = _system_agent_key()
 
-    # read the full list
     full = db.json().get(key, "$")
     settings_list: list = []
     if isinstance(full, list) and full and isinstance(full[0], list):
@@ -67,45 +71,36 @@ def _write_entry(db, validated: dict) -> None:
     db.json().set(key, "$", settings_list)
 
 
-def _migrate_legacy(db) -> dict:
-    """One-off migration: move the old ``system:plugins:mgmt_message`` dict into ``system:agent``."""
-    legacy = db.json().get(_LEGACY_KEY)
-    if not isinstance(legacy, dict) or not legacy:
-        return {}
-
-    try:
-        validated = PluginSettings(**legacy).model_dump()
-        _write_entry(db, validated)
-        db.delete(_LEGACY_KEY)
-        return validated
-    except Exception:  # noqa: BLE001 - migration must never block the settings load
-        # if the legacy value does not validate, leave it in place
-        return {}
-
-
 @plugin
 def load_settings(plugin_id: str, agent_id: str) -> dict:
-    # the plugin settings live inside the global ``system:agent`` list under a
-    # single entry (like the system embedder configuration), NOT in
-    # ``system:plugins:*``
+    """Read the plugin settings from the global ``system:agent`` settings list.
+
+    NOTE: the Plugin base invokes the ``load_settings`` override synchronously,
+    so this must stay a plain function (no async / no crud_settings).
+    """
     db = get_sync_db()
     found = db.json().get(_system_agent_key(), f'$[?(@.name=="{_MGMT_SETTING_NAME}")]')
-    if not found:
-        return _migrate_legacy(db)
+    if found and isinstance(found[0], dict):
+        value = found[0].get("value")
+        if isinstance(value, dict):
+            return value
 
-    entry = found[0]
-    if not isinstance(entry, dict):
-        return {}
-    value = entry.get("value")
-    return value if isinstance(value, dict) else {}
+    # not stored: one-off migration of the legacy key, otherwise model defaults
+    migrated = _migrate_legacy(db)
+    if migrated is not None:
+        return migrated
+    return PluginSettings().model_dump()
 
 
 @plugin
 def save_settings(plugin_id: str, settings: dict, agent_id: str) -> dict:
-    # validate against the model
+    """Upsert the plugin settings into the global ``system:agent`` list.
+
+    Sync override (the Plugin base calls it without await).
+    """
     validated = PluginSettings(**settings).model_dump()
     db = get_sync_db()
-    _write_entry(db, validated)
+    _upsert_entry(db, validated)
     # no longer used: drop the legacy key if it still exists
     if db.exists(_LEGACY_KEY):
         db.delete(_LEGACY_KEY)
@@ -120,3 +115,19 @@ def activated(plugin):
     db = get_sync_db()
     if db.exists(_LEGACY_KEY):
         db.delete(_LEGACY_KEY)
+
+
+def _migrate_legacy(db) -> dict | None:
+    """One-off migration: move the old ``system:plugins:mgmt_message`` dict into ``system:agent``."""
+    legacy = db.json().get(_LEGACY_KEY)
+    if not isinstance(legacy, dict) or not legacy:
+        return None
+
+    try:
+        validated = PluginSettings(**legacy).model_dump()
+        _upsert_entry(db, validated)
+        db.delete(_LEGACY_KEY)
+        return validated
+    except Exception as e:  # noqa: BLE001 - migration must never block the settings load
+        log.error(f"mgmt_message legacy migration failed: {e}")
+        return None

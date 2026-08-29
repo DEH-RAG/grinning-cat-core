@@ -38,6 +38,7 @@ from cat.db.cruds import settings as crud_settings
 from cat.db.database import DEFAULT_AGENT_KEY, DEFAULT_SYSTEM_KEY, get_sync_db
 from cat.db.models import Setting
 from cat.exceptions import CustomForbiddenException
+from tests.utils import get_client_admin_headers
 
 # the plugin id (folder name) and the global entry where its settings live
 PLUGIN_ID = "mgmt_message"
@@ -302,6 +303,42 @@ async def test_get_plugin_settings_normal_mode(secure_client, secure_client_head
         "global_message",
         "show_global_msg",
     }
+
+    await _cleanup()
+
+
+# the standard system settings route (same pattern as the embedder upsert)
+# persists the plugin settings into system:agent — the MyADMIN Management mode
+# save path
+async def test_put_mgmt_message_settings(client, secure_client, secure_client_headers, cheshire_cat):
+    # activate the plugin so its settings are loaded via the plugin overrides
+    await secure_client.put("/plugins/toggle/mgmt_message", headers=secure_client_headers)
+
+    payload = {
+        "management_message": "Nuovo messaggio",
+        "management_active": True,
+        "global_message": "Nuovo avviso",
+        "show_global_msg": True,
+    }
+    # system-level write: authenticate as the admin (SYSTEM WRITE)
+    admin_headers = await get_client_admin_headers(client)
+    response = await secure_client.put("/plugins/system/settings/mgmt_message", headers=admin_headers, json=payload)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "mgmt_message"
+    assert body["value"] == payload
+
+    # persisted inside system:agent under the mgmt_message entry
+    db = get_sync_db()
+    found = db.json().get(MGMT_SYSTEM_AGENT_KEY, f'$[?(@.name=="{_MGMT_SETTING_NAME}")]')
+    assert isinstance(found, list) and found
+    assert found[0]["value"] == payload
+    assert found[0]["category"] == _MGMT_SETTING_CATEGORY
+
+    # the value is served from system:agent
+    loaded = await crud_settings.get_setting_by_name(DEFAULT_SYSTEM_KEY, _MGMT_SETTING_NAME)
+    assert loaded["value"] == payload
 
     await _cleanup()
 
