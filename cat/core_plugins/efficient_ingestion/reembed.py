@@ -183,6 +183,10 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
             and doc_chunker == active_chunker_name
         ):
             # already up to date for the current embedder AND chunker
+            log.debug(
+                f"Agent id: {ccat._id}. Source {source_name}: already completed with the "
+                f"active embedder/chunker ({active_embedder_name!r}/{active_chunker_name!r}), skipping"
+            )
             continue
 
         if doc_status == IngestionStatus.COMPLETED.value:
@@ -197,8 +201,14 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
             IngestionStatus.DOWNLOADING.value,
             IngestionStatus.DOWNLOADED.value,
         ):
-            # in-flight / stale: resume from the recorded phase (conservative)
-            start_phase = doc_phase if doc_phase in (PHASE_EMBEDDING, PHASE_PARSING_CHUNKING) else PHASE_PARSING_CHUNKING
+            # in-flight / stale: resume from the recorded phase (conservative).
+            # A chunker change invalidates even an embedding-phase row: the stored
+            # chunks were produced by the OLD chunker, so a chunk-reuse would keep
+            # stale chunks -> full re-ingest (parsing_chunking) instead.
+            if doc_chunker != active_chunker_name:
+                start_phase = PHASE_PARSING_CHUNKING
+            else:
+                start_phase = doc_phase if doc_phase in (PHASE_EMBEDDING, PHASE_PARSING_CHUNKING) else PHASE_PARSING_CHUNKING
         else:
             # no doc or unknown: embedding if reusable points exist, else full re-ingest
             has_points = any(
@@ -206,6 +216,14 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
                 for p in existing_points
             )
             start_phase = PHASE_EMBEDDING if has_points else PHASE_PARSING_CHUNKING
+
+        # ---- log the phase transition (debug) ----
+        log.debug(
+            f"Agent id: {ccat._id}. Source {source_name}: ingestion phase "
+            f"{doc_phase or '(none)'} -> {start_phase} (status {doc_status or '(none)'} -> "
+            f"{IngestionStatus.PROCESSING.value}, embedder {doc_embedder!r} -> {active_embedder_name!r}, "
+            f"chunker {doc_chunker!r} -> {active_chunker_name!r})"
+        )
 
         # ---- claim the per-source work (skip if another worker holds it) ----
         # Only rows with an existing status doc need (and support) a claim: a
