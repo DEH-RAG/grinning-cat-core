@@ -66,7 +66,7 @@ async def get_ingestion_setting(
 @endpoint.put("/settings/{configuration_name}", prefix="/ingestion", tags=["Ingestion"])
 async def upsert_ingestion_setting(
     configuration_name: str,
-    payload: dict[str, Any],
+    payload: dict[str, Any] = {},
     info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.WRITE),
 ) -> dict[str, Any]:
     """Update one engine configuration and select it as the engine to run."""
