@@ -5,15 +5,18 @@ Here is a collection of methods to hook into the RabbitHole execution pipeline.
 These hooks allow to intercept the uploaded documents at different places before they are saved into memory.
 
 """
-from typing import List, Dict
+from typing import Any, Dict, List
+
 from langchain_community.document_loaders.parsers.html.bs4 import BS4HTMLParser
-from langchain_community.document_loaders.parsers.language.language_parser import LanguageParser
+from langchain_community.document_loaders.parsers.language.language_parser import (
+    LanguageParser,
+)
 from langchain_community.document_loaders.parsers.pdf import PyMuPDFParser
 from langchain_community.document_loaders.parsers.txt import TextParser
 from langchain_core.documents import Document
 
-from cat import hook, PointStruct
-from cat.core_plugins.base_plugin.parsers import TableParser, JSONParser
+from cat import PointStruct, hook
+from cat.core_plugins.base_plugin.parsers import JSONParser, TableParser
 
 
 @hook(priority=999)
@@ -217,6 +220,19 @@ def rabbithole_processing_heartbeat_stop(source: str, scope: str, cat) -> None:
     ``ingestion_status`` plugin cancels its heartbeat task here. No-op default.
     """
     pass
+
+
+@hook(priority=0)
+async def run_in_ingestion_executor(result: Any, func, cat) -> Any:
+    """Hook to run a heavy ingestion callable off the event loop on a dedicated lane.
+
+    Fired by the core (RabbitHole, CheshireCat) and by plugins that do heavy
+    ingestion work (chunking, embedding). The ``efficient_ingestion`` plugin
+    provides a dedicated low-concurrency, de-prioritized thread pool and runs
+    ``func`` on it. The no-op default returns None: no dedicated lane is active
+    and callers fall back to the default executor (upstream parity).
+    """
+    return None
 
 
 @hook(priority=0)

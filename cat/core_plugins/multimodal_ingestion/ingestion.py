@@ -11,6 +11,7 @@ this module implements them.
 Importing this module has zero side effects.
 """
 
+import asyncio
 import base64
 import hashlib
 import mimetypes
@@ -22,7 +23,6 @@ import uuid
 from langchain_core.documents import Document
 
 from cat.services.factory.embedder import is_multimodal_embedder
-from cat.services.ingestion_executor import run_in_ingestion_executor
 from cat.services.memory.models import PointStruct
 
 
@@ -139,6 +139,22 @@ async def delete_source_image_files(cat, collection_id: str, path: str, source_n
             break
 
 
+async def _run_in_ingestion_executor(cat, func, *args):
+    """Run a heavy ingestion callable via the dedicated ingestion lane.
+
+    Dispatches through the ``run_in_ingestion_executor`` hook (the
+    efficient_ingestion plugin provides the dedicated pool); falls back to the
+    default executor when no plugin provides it.
+    """
+    task = func if not args else (lambda: func(*args))
+    result = await cat.plugin_manager.execute_hook(
+        "run_in_ingestion_executor", None, task, caller=cat,
+    )
+    if result is None:
+        result = await asyncio.to_thread(task)
+    return result
+
+
 async def build_image_points(
     cat,
     images: list[dict],
@@ -177,11 +193,11 @@ async def build_image_points(
         # sub-crops. Embed the source file itself as a single whole-image point
         # (image_file = the source, no derived file) and ignore crops.
         whole_image = source_bytes if source_bytes is not None else (images[0]["image_bytes"] if images else None)
-        embeds = await run_in_ingestion_executor(lambda: embedder.embed_images([whole_image])) if whole_image is not None else []
+        embeds = await _run_in_ingestion_executor(cat, lambda: embedder.embed_images([whole_image])) if whole_image is not None else []
         files_and_vectors = [(source, embeds[0])] if embeds and embeds[0] is not None else []
     else:
-        image_vectors = await run_in_ingestion_executor(
-            lambda: embedder.embed_images([img["image_bytes"] for img in images])
+        image_vectors = await _run_in_ingestion_executor(
+            cat, lambda: embedder.embed_images([img["image_bytes"] for img in images])
         )
         files_and_vectors = []
         for idx, (img, vector) in enumerate(zip(images, image_vectors)):
