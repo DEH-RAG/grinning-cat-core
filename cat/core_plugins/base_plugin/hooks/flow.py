@@ -8,6 +8,19 @@ from typing import Dict, List
 from cat import hook, UserMessage, RecallSettings, BillTheLizard, CheshireCat
 from cat.core_plugins.base_plugin.registry import CheshireCatPluginRegistry
 from cat.looking_glass.callbacks import WebSocketCallbackManager
+from cat.looking_glass.models import AgenticWorkflowTask
+
+
+@hook(priority=0)
+def before_agentic_workflow(task: AgenticWorkflowTask, cat) -> AgenticWorkflowTask:
+    """Hook to enrich or modify the agentic workflow task before it runs.
+
+    Fired by ``StrayCat.__call__`` right before ``self._agentic_workflow.run``.
+    The ``multimodal_ingestion`` plugin uses it to attach the recalled
+    multimodal images (``task.images``) so a vision-capable LLM can see them.
+    No-op default: returns the task unchanged.
+    """
+    return task
 
 
 @hook(priority=0)

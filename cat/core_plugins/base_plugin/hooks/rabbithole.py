@@ -217,3 +217,40 @@ def rabbithole_processing_heartbeat_stop(source: str, scope: str, cat) -> None:
     ``ingestion_status`` plugin cancels its heartbeat task here. No-op default.
     """
     pass
+
+
+@hook(priority=0)
+def rabbithole_collects_document_images(images: List[Dict], docs: List[Document], cat) -> List[Dict]:
+    """Hook to extract the images produced by multimodal parsers from the parsed docs.
+
+    Fired by RabbitHole ``_parse_to_docs`` BEFORE chunking (chunkers may drop
+    the ``image_base64`` metadata that carries the payload). The ``multimodal_ingestion``
+    plugin walks the parsed documents, returns one entry per extracted image
+    (``image_base64`` / ``image_bytes`` / ``image_mime_type``) and strips the
+    transient payload from the docs. First arg ``images`` is the chain carrier:
+    with no plugin the no-op returns it unchanged (upstream parity: no images).
+    """
+    return images
+
+
+@hook(priority=0)
+def rabbithole_stores_image_points(
+    image_points: List[PointStruct],
+    images: List[Dict],
+    source: str,
+    source_bytes: bytes | None,
+    metadata: Dict | None,
+    file_hash: str | None,
+    chat_id: str | None,
+    cat,
+) -> List[PointStruct]:
+    """Hook to build the image points stored alongside a source's text chunks.
+
+    Fired by RabbitHole ``store_documents`` when the source produced images
+    (from the parse-time collection). The ``multimodal_ingestion`` plugin embeds
+    them via ``embed_images``, saves them as files (``save_file``) and returns
+    the ``PointStruct`` list; the core appends them to the same collection.
+    First arg ``image_points`` is the chain carrier: with no plugin the no-op
+    returns it unchanged (upstream parity: no image points).
+    """
+    return image_points
