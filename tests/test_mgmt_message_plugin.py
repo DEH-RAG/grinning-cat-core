@@ -120,7 +120,7 @@ async def test_legacy_key_migrated_on_load():
 
     from cat.core_plugins.mgmt_message.settings import load_settings
 
-    loaded = load_settings.function(PLUGIN_ID, DEFAULT_SYSTEM_KEY)
+    loaded = await load_settings.function(PLUGIN_ID, DEFAULT_SYSTEM_KEY)
     assert loaded == payload
 
     # migrated into system:agent, legacy key removed
@@ -274,7 +274,8 @@ async def test_http_gateway_allows_system_principal_with_real_hook(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# (c) normal-mode / RITA read: GET /plugins/settings/mgmt_message
+# (c) normal-mode / RITA read: GET /mgmt_message/settings (SYSTEM READ, moved
+# from the old core /plugins/system/settings route into the plugin)
 # ---------------------------------------------------------------------------
 
 async def test_get_plugin_settings_normal_mode(secure_client, secure_client_headers, cheshire_cat):
@@ -287,7 +288,7 @@ async def test_get_plugin_settings_normal_mode(secure_client, secure_client_head
     await _store(payload)
 
     # admin (system agent) reads the global settings — this is the RITA read path
-    response = await secure_client.get("/plugins/system/settings/mgmt_message", headers=secure_client_headers)
+    response = await secure_client.get("/mgmt_message/settings", headers=secure_client_headers)
 
     assert response.status_code == 200
     body = response.json()
@@ -310,7 +311,7 @@ async def test_get_plugin_settings_normal_mode(secure_client, secure_client_head
     await _cleanup()
 
 
-# the standard system settings route (same pattern as the embedder upsert)
+# the plugin's own settings route (same pattern as the embedder upsert)
 # persists the plugin settings into system:agent — the MyADMIN Management mode
 # save path
 async def test_put_mgmt_message_settings(client, secure_client, secure_client_headers, cheshire_cat):
@@ -325,7 +326,7 @@ async def test_put_mgmt_message_settings(client, secure_client, secure_client_he
     }
     # system-level write: authenticate as the admin (SYSTEM WRITE)
     admin_headers = await get_client_admin_headers(client)
-    response = await secure_client.put("/plugins/system/settings/mgmt_message", headers=admin_headers, json=payload)
+    response = await secure_client.put("/mgmt_message/settings", headers=admin_headers, json=payload)
 
     assert response.status_code == 200
     body = response.json()
@@ -342,6 +343,24 @@ async def test_put_mgmt_message_settings(client, secure_client, secure_client_he
     # the value is served from system:agent
     loaded = await crud_settings.get_setting_by_name(DEFAULT_SYSTEM_KEY, _MGMT_SETTING_NAME)
     assert loaded["value"] == payload
+
+    await _cleanup()
+
+
+# ---------------------------------------------------------------------------
+# (c2) the plugin settings routes must NOT be public: read and write require
+# SYSTEM permission, exactly like the old core /plugins/system/settings routes
+# ---------------------------------------------------------------------------
+
+async def test_settings_endpoints_require_system_permission(client, secure_client, secure_client_headers, cheshire_cat):
+    # activate the plugin so its custom endpoints are registered
+    await secure_client.put("/plugins/toggle/mgmt_message", headers=secure_client_headers)
+
+    unauthenticated_put = await client.put("/mgmt_message/settings", json={"management_active": True})
+    assert unauthenticated_put.status_code == 401
+
+    unauthenticated_get = await client.get("/mgmt_message/settings")
+    assert unauthenticated_get.status_code == 401
 
     await _cleanup()
 

@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
-from inspect import getmembers, isabstract
+from inspect import getmembers, isabstract, isawaitable
 from pathlib import Path
 from typing import Dict, List, Tuple, Any, Type
 from pydantic import BaseModel, ValidationError
@@ -206,7 +206,14 @@ class Plugin:
 
         # is "load_settings" hook defined in the plugin?
         if "load_settings" in self.overrides:
-            return self.overrides["load_settings"].function(self._id, agent_id)
+            # the override is called plain: when it is an async function the
+            # coroutine must be awaited, otherwise it would be returned as-is
+            # (plugin settings that never resolve) — so the plugin can rely on
+            # the async official ``cat.db.crud`` API instead of sync Redis clients
+            result = self.overrides["load_settings"].function(self._id, agent_id)
+            if isawaitable(result):
+                result = await result
+            return result
 
         # by default, plugin settings are saved inside the Redis database
         settings = await crud_plugins.get_setting(agent_id, self._id) or self._get_settings_from_model()  # type: ignore[arg]
@@ -227,7 +234,12 @@ class Plugin:
     async def save_settings(self, settings: Dict, agent_id: str) -> Dict[str, Any]:
         # is "settings_save" hook defined in the plugin?
         if "save_settings" in self.overrides:
-            return self.overrides["save_settings"].function(self._id, settings, agent_id)
+            # same plain-call handling as load_settings: await only when the
+            # override is actually async
+            result = self.overrides["save_settings"].function(self._id, settings, agent_id)
+            if isawaitable(result):
+                result = await result
+            return result
 
         try:
             # overwrite settings over old ones
