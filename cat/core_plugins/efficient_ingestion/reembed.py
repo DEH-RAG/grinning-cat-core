@@ -119,7 +119,12 @@ async def _resolve_callers(ccat, chat_id):
     return stray_cat, str(chat_id), chat_id
 
 
-async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_sources: list[StoredSourceWithMetadata]) -> None:
+async def reembed_sources(
+    ccat,
+    collection_name: VectorMemoryType,
+    stored_sources: list[StoredSourceWithMetadata],
+    stale_after: float | None = None,
+) -> None:
     """
     Re-embed stored sources into a vector memory collection (phase machine).
 
@@ -234,7 +239,7 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
                 ccat.agent_key,
                 scope,
                 source_name,
-                stale_after=_claim_stale_after(),
+                stale_after=_claim_stale_after() if stale_after is None else stale_after,
                 owner=owner,
                 claim_completed=(doc_status == IngestionStatus.COMPLETED.value),
             )

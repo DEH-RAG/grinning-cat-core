@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from cat.core_plugins.ingestion_status import plugin as ingestion_plugin
-from cat.core_plugins.ingestion_status import resume
+from cat.core_plugins.efficient_ingestion import resume
 from cat.core_plugins.ingestion_status.reconcile import reconcile_agent
 from cat.core_plugins.ingestion_status.registry import (
     IngestionStatus,
@@ -252,7 +252,7 @@ async def test_after_lizard_bootstrap_schedules_pass(monkeypatch):
     monkeypatch.setenv("CAT_INGESTION_RESUME_INTERVAL_SECONDS", "60")
     # keep the startup pass a no-op (no agents to sweep in this test)
     monkeypatch.setattr(
-        "cat.core_plugins.ingestion_status.resume.crud_settings.get_agents_main_keys",
+        "cat.core_plugins.efficient_ingestion.resume.crud_settings.get_agents_main_keys",
         AsyncMock(return_value=[]),
     )
 
@@ -455,7 +455,7 @@ async def test_resume_marks_stale_uploaded_error_when_file_missing(cheshire_cat,
 
 
 async def test_resume_marks_error_when_file_missing_at_read_step(cheshire_cat, monkeypatch):
-    """File present at pre-check but gone at the re-ingest read -> marked ``error``."""
+    """File missing at the resume read step -> marked ``error`` (cannot resume)."""
     lizard = cheshire_cat.lizard
     agent_key = cheshire_cat.agent_key
 
@@ -473,13 +473,8 @@ async def test_resume_marks_error_when_file_missing_at_read_step(cheshire_cat, m
     })
 
     monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
-    reads = {"count": 0}
-
-    def flaky_read(source, remote):
-        reads["count"] += 1
-        return b"content" if reads["count"] == 1 else None
-
-    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", flaky_read)
+    # the file is gone on disk: _source_from_entry reads it once and reports missing
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda source, remote: None)
 
     calls = []
 
@@ -612,7 +607,7 @@ async def test_periodic_sweep_completes_stale_uploaded(cheshire_cat, monkeypatch
 
     # only this agent is enumerated by the startup pass
     monkeypatch.setattr(
-        "cat.core_plugins.ingestion_status.resume.crud_settings.get_agents_main_keys",
+        "cat.core_plugins.efficient_ingestion.resume.crud_settings.get_agents_main_keys",
         AsyncMock(return_value=[agent_key]),
     )
     monkeypatch.setenv("CAT_INGESTION_RESUME_INTERVAL_SECONDS", "60")
@@ -700,3 +695,77 @@ async def test_heartbeat_keeps_processing_fresh_and_blocks_double_resume(cheshir
     doc = await get_status(agent_key, "agent", source)
     assert doc is not None
     assert doc["status"] == "processing"
+
+async def test_resume_parsing_phase_reads_file_and_cleans_orphan_images(cheshire_cat, monkeypatch):
+    """[restart] A processing row stuck at ``parsing_chunking`` resumes by re-reading
+    the file from disk and cleaning up any orphan extracted images before the
+    re-ingest — the ONE state machine (reembed_sources) does both."""
+    from cat.core_plugins.ingestion_status.registry import PHASE_PARSING_CHUNKING
+
+    lizard = cheshire_cat.lizard
+    agent_key = cheshire_cat.agent_key
+
+    # seed: processing + phase parsing_chunking (crashed mid-parse, some time ago —
+    # the container was down before the restart)
+    old = time.time() - 1000
+    await crud.store(status_key(agent_key, "agent", "doc.pdf"), {
+        "source": "doc.pdf",
+        "scope": "agent",
+        "chat_id": None,
+        "type": "file",
+        "status": IngestionStatus.PROCESSING.value,
+        "phase": PHASE_PARSING_CHUNKING,
+        "error": None,
+        "error_at": None,
+        "created_at": old,
+        "updated_at": old,
+    })
+
+    monkeypatch.setattr(lizard, "get_cheshire_cat", AsyncMock(return_value=cheshire_cat))
+    # the file is on disk; the resume must re-read it (not rely on any in-memory copy)
+    read_calls = []
+
+    def tracking_read(source, remote):
+        read_calls.append(source)
+        return b"%PDF-1.4 fake content for resume"
+
+    monkeypatch.setattr(cheshire_cat.file_manager, "read_file", tracking_read)
+
+    # an orphan image file/point from the previous incomplete parse
+    monkeypatch.setattr(
+        cheshire_cat.file_manager, "remove_file",
+        lambda path: (cleanup_calls.append(path) or True),
+    )
+    cleanup_calls = []
+
+    async def fake_add_points(collection_name, points):
+        pass
+
+    monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
+    monkeypatch.setattr(
+        cheshire_cat.vector_memory_handler, "delete_tenant_points",
+        AsyncMock(side_effect=lambda collection_name, metadata: None),
+    )
+    monkeypatch.setattr(
+        cheshire_cat.vector_memory_handler, "get_all_tenant_points",
+        AsyncMock(return_value=([], None)),
+    )
+
+    calls = []
+
+    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
+        calls.append((filename, file))
+        await ingestion_plugin.after_rabbithole_stored_documents.function(filename, [object()], cat)
+
+    monkeypatch.setattr(cheshire_cat.lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+
+    await resume._resume_agent(lizard, agent_key)
+
+    # the file was re-read from disk and handed to ingest_file (full re-ingest)
+    assert read_calls == ["doc.pdf"]
+    assert len(calls) == 1
+    assert calls[0][0] == "doc.pdf"
+    # the status ends completed
+    doc = await get_status(agent_key, "agent", "doc.pdf")
+    assert doc is not None
+    assert doc["status"] == "completed"
