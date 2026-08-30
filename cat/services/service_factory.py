@@ -12,6 +12,7 @@ from cat.services.factory.chunker import RecursiveTextChunkerSettings
 from cat.services.factory.context_retriever import DefaultContextRetrieverSettings
 from cat.services.factory.embedder import EmbedderDumbConfig
 from cat.services.factory.file_manager import DummyFileManagerConfig
+from cat.services.factory.ingestion import BaseIngestionConfiguration
 from cat.services.factory.llm import LLMDefaultConfig
 from cat.services.factory.models import BaseFactoryConfigModel
 from cat.services.factory.vector_db import QdrantConfig
@@ -33,6 +34,7 @@ class ServiceFactory:
             "llm",
             "vector_database",
             "agentic_workflow",
+            "re-ingestion",
         ],
         schema_name: str,
     ):
@@ -54,6 +56,7 @@ class ServiceFactory:
             "file_manager": DummyFileManagerConfig,
             "llm": LLMDefaultConfig,
             "vector_database": QdrantConfig,
+            "re-ingestion": BaseIngestionConfiguration,
         }
 
     async def get_config_class_from_adapter(self, obj: Any) -> Type[BaseModel] | None:

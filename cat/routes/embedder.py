@@ -1,22 +1,30 @@
-from typing import Dict
-from fastapi import APIRouter, Body, BackgroundTasks
+
+from fastapi import APIRouter, BackgroundTasks, Body
 
 from cat.auth.connection import AuthorizedInfo
-from cat.auth.permissions import AuthResource, AuthPermission, check_permissions
-from cat.routes.routes_utils import GetSettingsResponse, GetSettingResponse, UpsertSettingResponse, run_background_task
+from cat.auth.permissions import AuthPermission, AuthResource, check_permissions
+from cat.routes.routes_utils import (
+    GetSettingResponse,
+    GetSettingsResponse,
+    UpsertSettingResponse,
+    run_background_task,
+)
 from cat.services.service_factory import ServiceFactory
 
 
-async def _reembed_on_embedder_change(lizard, embedder_name: str, embedder_size: int) -> None:
-    """Notify plugins that the embedder changed (re-embed trigger).
+async def _run_ingestion_on_embedder_change(lizard) -> None:
+    """Re-embed pass on embedder change, via the replaceable ingestion engine.
 
-    The actual re-embed engine lives in the ``efficient_ingestion`` core plugin
-    (``after_embedder_settings_update`` hook); the core only fires the hook so
-    the fork stays close to upstream (no re-embed logic here).
+    The engine is resolved through the ServiceFactory (``re-ingestion``
+    category): the core provides ``BaseIngestionConfiguration`` (upstream
+    parity) and plugins can register more efficient implementations through
+    the ``factory_allowed_ingestions`` hook.
     """
-    await lizard.plugin_manager.execute_hook(
-        "after_embedder_settings_update", embedder_name, embedder_size, caller=lizard
-    )
+    from cat.services.factory.ingestion import resolve_ingestion_engine
+
+    engine = await resolve_ingestion_engine(lizard)
+    if engine is not None:
+        await engine.run(lizard)
 
 
 router = APIRouter(tags=["Embedder"], prefix="/embedder")
@@ -60,7 +68,7 @@ async def get_embedder_settings(
 async def upsert_embedder_setting(
     background_tasks: BackgroundTasks,
     embedder_name: str,
-    payload: Dict = Body(default={}),
+    payload: dict = Body(default={}),
     info: AuthorizedInfo = check_permissions(AuthResource.EMBEDDER, AuthPermission.WRITE),
 ) -> UpsertSettingResponse:
     """Upsert the Embedder setting"""
@@ -78,15 +86,13 @@ async def upsert_embedder_setting(
 
     current_embedder = await lizard.embedder()
 
-    # a characterizing feature of the embedder has been updated: inform the plugins,
-    # which own the re-embed engine (efficient_ingestion core plugin hook)
+    # a characterizing feature of the embedder has been updated: run the
+    # replaceable ingestion engine (factory: re-ingestion category)
     if previous_embedder != current_embedder:
         run_background_task(
             background_tasks,
-            _reembed_on_embedder_change,
+            _run_ingestion_on_embedder_change,
             info.lizard,
-            current_embedder.name,
-            current_embedder.size,
         )
 
     return UpsertSettingResponse(**result)

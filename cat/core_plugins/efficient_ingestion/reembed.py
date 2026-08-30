@@ -1,12 +1,12 @@
-"""Re-embed engine for embedder changes (owned by the efficient_ingestion plugin).
+"""Efficient re-embed engine (owned by the efficient_ingestion plugin).
 
-This module hosts the re-embed logic that used to live in the core
-(``CheshireCat.embed_stored_sources`` + ``BillTheLizard.embed_all_in_cheshire_cats``):
-when the configured embedder changes, on embedder changes, the stored sources of every agent are re-embedded
-re-embedded reusing the already-stored chunks (chunk-reuse) or, when no chunk
-is reusable (e.g. the collection was just recreated), by re-ingesting the
-source file/URL. Image points are re-embedded via ``embed_images`` only for
-multimodal embedders, preserved payload-only otherwise.
+Implements ``EfficientIngestionEngine`` — the replaceable, more efficient
+implementation of the core ``BaseIngestionEngine``: on embedder changes the
+stored sources of every agent are re-embedded reusing the already-stored
+chunks (chunk-reuse) or, when no chunk is reusable (e.g. the collection was
+just recreated), by re-ingesting the source file/URL. Image points are
+re-embedded via ``embed_images`` only for multimodal embedders, preserved
+payload-only otherwise. Status is written through ``ingestion_status.registry``.
 
 Import-safe: nothing runs at import time.
 """
@@ -17,9 +17,6 @@ import uuid
 
 from langchain_core.documents import Document
 
-from cat.core_plugins.efficient_ingestion.settings import (
-    get_settings as get_plugin_settings,
-)
 from cat.core_plugins.ingestion_status.registry import (
     IngestionStatus,
     set_status,
@@ -28,6 +25,7 @@ from cat.db.cruds import settings as crud_settings
 from cat.log import log
 from cat.looking_glass.models import StoredSourceWithMetadata
 from cat.services.factory.embedder import is_multimodal_embedder
+from cat.services.factory.ingestion import BaseIngestionEngine
 from cat.services.ingestion_executor import run_in_ingestion_executor
 from cat.services.memory.models import PointStruct, VectorMemoryType
 from cat.utils import guess_file_type, is_url
@@ -274,59 +272,69 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
     log.info(f"Agent id: {ccat._id}. Embedded {counter} files to the vector memory")
 
 
-async def reembed_all(lizard, embedder_name: str, embedder_size: int) -> bool:
-    """Re-embed all the stored files and procedures in all the Cheshire Cats.
+class EfficientIngestionEngine(BaseIngestionEngine):
+    """Efficient re-embed engine (chunk-reuse, image recovery, status writes).
 
-    Port of ``BillTheLizard.embed_all_in_cheshire_cats``. Fixes the original
-    O(agents) duplication: the per-entry gathering used to run once per entry
-    inside the initialization loop (re-embedding every agent N times). Now all
-    databases are serialized-initialized first, then the re-embeds run once
-    with a concurrency cap.
+    Pluggable implementation of the base ingestion engine, registered by the
+    plugin through the ``factory_allowed_ingestions`` hook as
+    ``EfficientIngestionConfiguration``. Unlike the base (upstream) engine it:
+    reuses the stored chunks instead of re-parsing every source, recovers the
+    image points via ``embed_images`` when the embedder is multimodal, writes
+    the ingestion status through ``ingestion_status.registry``, and honors a
+    configurable concurrency cap (settings category ``re-ingestion``).
     """
-    success = False
-    try:
-        plugin_settings = await get_plugin_settings()
-        max_concurrency = max(1, int(plugin_settings.get("reembed_max_concurrency", 5)))
 
-        ccat_ids = await crud_settings.get_agents_main_keys()
-        stored_files_by_ccat = []
-        # first, get all the stored files from all the Cheshire Cats with the
-        # metadata stored within the vector memory; nothing is removed from the
-        # latter to avoid any race condition
-        for ccat_id in ccat_ids:
-            if (ccat := await lizard.get_cheshire_cat(ccat_id)) is None:
-                continue
-            stored_files_by_ccat.append({
-                "ccat": ccat,
-                "stored_sources": await ccat.get_stored_sources_with_metadata(),
-            })
+    def __init__(self, reembed_max_concurrency: int = 5, **kwargs):
+        super().__init__(**kwargs)
+        self.reembed_max_concurrency = max(1, int(reembed_max_concurrency))
 
-        # re-initialize all the vector databases in a serialized way, outside
-        # threads to avoid race conditions
-        for entry in stored_files_by_ccat:
-            await entry["ccat"].vector_memory_handler.initialize(embedder_name, embedder_size)
+    async def run(self, lizard) -> bool:
+        """Resolve the current embedder and run the re-embed pass."""
+        success = False
+        try:
+            embedder = await lizard.embedder()
+            embedder_name = embedder.name
+            embedder_size = embedder.size
 
-        # then re-embed every stored file/procedure, limiting concurrent
-        # embeddings to avoid overwhelming resources (tunable via the plugin
-        # settings, category 're-ingestion')
-        semaphore = asyncio.Semaphore(max_concurrency)
+            ccat_ids = await crud_settings.get_agents_main_keys()
+            stored_files_by_ccat = []
+            # first, get all the stored files from all the Cheshire Cats with the
+            # metadata stored within the vector memory; nothing is removed from
+            # the latter to avoid any race condition
+            for ccat_id in ccat_ids:
+                if (ccat := await lizard.get_cheshire_cat(ccat_id)) is None:
+                    continue
+                stored_files_by_ccat.append({
+                    "ccat": ccat,
+                    "stored_sources": await ccat.get_stored_sources_with_metadata(),
+                })
 
-        async def embed_with_limit(entry_):
-            async with semaphore:
-                tasks = [
-                    reembed_sources(entry_["ccat"], collection_name, sources)
-                    for collection_name, sources in entry_["stored_sources"].items()
-                    if sources
-                ] + [entry_["ccat"].embed_procedures()]
-                await asyncio.gather(*tasks)
+            # re-initialize all the vector databases in a serialized way, outside
+            # threads to avoid race conditions
+            for entry in stored_files_by_ccat:
+                await entry["ccat"].vector_memory_handler.initialize(embedder_name, embedder_size)
 
-        await asyncio.gather(*[embed_with_limit(entry) for entry in stored_files_by_ccat])
+            # then re-embed every stored file/procedure, limiting concurrent
+            # embeddings to avoid overwhelming resources (tunable via the plugin
+            # settings, category 're-ingestion')
+            semaphore = asyncio.Semaphore(self.reembed_max_concurrency)
 
-        success = True
-    except Exception as e:  # noqa: BLE001 - re-embed failure is surfaced on the hook, never raised
-        log.error(f"Error embedding all stored files: {e}")
+            async def embed_with_limit(entry_):
+                async with semaphore:
+                    tasks = [
+                        reembed_sources(entry_["ccat"], collection_name, sources)
+                        for collection_name, sources in entry_["stored_sources"].items()
+                        if sources
+                    ] + [entry_["ccat"].embed_procedures()]
+                    await asyncio.gather(*tasks)
 
-    await lizard.plugin_manager.execute_hook(
-        "after_all_cheshire_cats_embedded", success, caller=lizard,
-    )
-    return success
+            await asyncio.gather(*[embed_with_limit(entry) for entry in stored_files_by_ccat])
+
+            success = True
+        except Exception as e:  # noqa: BLE001 - surfaced on the hook, never raised
+            log.error(f"Error embedding all stored files: {e}")
+
+        await lizard.plugin_manager.execute_hook(
+            "after_all_cheshire_cats_embedded", success, caller=lizard,
+        )
+        return success

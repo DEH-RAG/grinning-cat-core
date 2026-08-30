@@ -1,4 +1,3 @@
-from typing import List
 
 from cat import (
     AgenticWorkflowConfig,
@@ -16,7 +15,17 @@ from cat.core_plugins.base_plugin.file_managers.configs import LocalFileManagerC
 
 
 @hook(priority=0)
-def factory_allowed_llms(allowed: List[LLMSettings], cat) -> List:
+def factory_allowed_ingestions(allowed, lizard):
+    """Hook to extend the list of supported ingestion (re-embed) engines.
+
+    The ``efficient_ingestion`` core plugin registers its
+    ``EfficientIngestionConfiguration`` here. No-op default.
+    """
+    return allowed
+
+
+@hook(priority=0)
+def factory_allowed_llms(allowed: list[LLMSettings], cat) -> list:
     """
     Hook to extend support of LLMs.
 
@@ -31,7 +40,7 @@ def factory_allowed_llms(allowed: List[LLMSettings], cat) -> List:
 
 
 @hook(priority=0)
-def factory_allowed_embedders(allowed: List[EmbedderSettings], lizard) -> List:
+def factory_allowed_embedders(allowed: list[EmbedderSettings], lizard) -> list:
     """Hook to extend list of supported embedders.
 
     Args:
@@ -45,7 +54,7 @@ def factory_allowed_embedders(allowed: List[EmbedderSettings], lizard) -> List:
 
 
 @hook(priority=0)
-def factory_allowed_auth_handlers(allowed: List[AuthHandlerConfig], cat) -> List:
+def factory_allowed_auth_handlers(allowed: list[AuthHandlerConfig], cat) -> list:
     """Hook to extend list of supported auth handlers.
 
     Args:
@@ -59,7 +68,7 @@ def factory_allowed_auth_handlers(allowed: List[AuthHandlerConfig], cat) -> List
 
 
 @hook(priority=0)
-def factory_allowed_file_managers(allowed: List[FileManagerConfig], cat) -> List:
+def factory_allowed_file_managers(allowed: list[FileManagerConfig], cat) -> list:
     """Hook to extend list of supported file managers.
 
     Args:
@@ -73,7 +82,7 @@ def factory_allowed_file_managers(allowed: List[FileManagerConfig], cat) -> List
 
 
 @hook(priority=0)
-def factory_allowed_chunkers(allowed: List[ChunkerSettings], cat) -> List:
+def factory_allowed_chunkers(allowed: list[ChunkerSettings], cat) -> list:
     """Hook to extend list of supported chunkers.
 
     Args:
@@ -87,7 +96,7 @@ def factory_allowed_chunkers(allowed: List[ChunkerSettings], cat) -> List:
 
 
 @hook(priority=0)
-def factory_allowed_context_retrievers(allowed: List[ContextRetrieverSettings], cat) -> List:
+def factory_allowed_context_retrievers(allowed: list[ContextRetrieverSettings], cat) -> list:
     """Hook to extend list of supported context retrievers.
 
     Args:
@@ -101,7 +110,7 @@ def factory_allowed_context_retrievers(allowed: List[ContextRetrieverSettings], 
 
 
 @hook(priority=0)
-def factory_allowed_vector_databases(allowed: List[VectorDatabaseSettings], cat) -> List:
+def factory_allowed_vector_databases(allowed: list[VectorDatabaseSettings], cat) -> list:
     """Hook to extend list of supported vector databases.
 
     Args:
@@ -115,7 +124,7 @@ def factory_allowed_vector_databases(allowed: List[VectorDatabaseSettings], cat)
 
 
 @hook(priority=0)
-def factory_allowed_agentic_workflows(allowed: List[AgenticWorkflowConfig], cat) -> List:
+def factory_allowed_agentic_workflows(allowed: list[AgenticWorkflowConfig], cat) -> list:
     """Hook to extend list of supported agentic workflows.
 
     Args:

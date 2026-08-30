@@ -1,20 +1,21 @@
-import hashlib
 import mimetypes
 import os
 import tempfile
-import time
 import uuid
 from io import BytesIO
-from typing import Dict, List
-
-from langchain_core.documents import Document
 
 from cat.auth.permissions import AuthUserInfo
 from cat.db import crud
 from cat.db.cruds import (
-    settings as crud_settings,
     conversations as crud_conversations,
+)
+from cat.db.cruds import (
     plugins as crud_plugins,
+)
+from cat.db.cruds import (
+    settings as crud_settings,
+)
+from cat.db.cruds import (
     users as crud_users,
 )
 from cat.log import log
@@ -23,11 +24,10 @@ from cat.looking_glass.mad_hatter.procedures import CatProcedureType
 from cat.looking_glass.models import StoredSourceWithMetadata
 from cat.looking_glass.stray_cat import StrayCat
 from cat.mixins import BotMixin, NonCopyableMixin
-from cat.services.factory.embedder import is_multimodal_embedder
 from cat.services.factory.file_manager import BaseFileManager
 from cat.services.factory.vector_db import BaseVectorDatabaseHandler
 from cat.services.ingestion_executor import run_in_ingestion_executor
-from cat.services.memory.models import VectorMemoryType, PointStruct
+from cat.services.memory.models import PointStruct, VectorMemoryType
 from cat.utils import guess_file_type, is_url
 
 
@@ -124,13 +124,13 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         # purge ingestion status registry keys (namespace owned by the ingestion-status plugin)
         await crud.destroy(f"agents:{self.agent_key}:ingestion:*")
 
-    async def get_stored_sources_with_metadata(self) -> Dict[VectorMemoryType, List[StoredSourceWithMetadata]]:
+    async def get_stored_sources_with_metadata(self) -> dict[VectorMemoryType, list[StoredSourceWithMetadata]]:
         """Get all stored files with their metadata."""
         results = {
             VectorMemoryType.DECLARATIVE: set(),
             VectorMemoryType.EPISODIC: set(),
         }
-        for collection_name in results.keys():
+        for collection_name in results:
             points, _ = await self.vector_memory_handler.get_all_tenant_points(str(collection_name), with_vectors=False)
             for point in points:
                 metadata = point.payload.get("metadata", {})  # type: ignore[union-attr]
@@ -189,7 +189,7 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         if wrong_dims:
             raise ValueError(
                 f"Embedder `{embedder.name}` produced vectors of dimension {sorted(wrong_dims)} "
-                f"but collection `{str(VectorMemoryType.PROCEDURAL)}` expects {expected_dim}. "
+                f"but collection `{VectorMemoryType.PROCEDURAL!s}` expects {expected_dim}. "
                 f"This usually means the configured embedder failed to instantiate and the factory "
                 f"silently fell back to a different one. Check the ServiceFactory logs for the real error."
             )
@@ -211,6 +211,59 @@ class CheshireCat(BotMixin, NonCopyableMixin):
 
         await self.vector_memory_handler.add_points_to_tenant(collection_name=collection_name, points=points)
         log.info(f"Agent id: {self._id}. Embedded {len(points)} triggers in {collection_name} vector memory")
+
+    async def embed_stored_sources(
+        self, collection_name: VectorMemoryType, stored_sources: list[StoredSourceWithMetadata]
+    ):
+        """
+        Embeds stored sources into a vector memory collection.
+
+        This method retrieves and processes a list of stored sources with their associated metadata and incorporates
+        them into a vector memory collection. During this process, any pre-existing embeddings in the collection are
+        cleared, and files are systematically ingested. The method handles potential irregularities such as missing
+        content or stray references and logs appropriate messages.
+
+        Args:
+            collection_name (VectorMemoryType): The name of the collection where the stored sources
+                will be embedded in vector memory.
+            stored_sources (List[StoredSourceWithMetadata]): A list of sources, each containing content
+                and metadata, to be embedded into vector memory.
+
+        Raises:
+            This method does not explicitly raise any exceptions but relies on the calling context to
+            handle exceptions raised by dependent operations such as file ingestion.
+        """
+        log.info(f"Agent id: {self._id}. Embedding stored files to the vector memory")
+
+        # first, clear all existing declarative and episodic embeddings
+        await self.vector_memory_handler.delete_tenant_points(str(collection_name))
+
+        rabbit_hole = self.rabbit_hole
+        counter = 0
+        for source in stored_sources:
+            content_type = None
+            if source.content:
+                content_type, _ = guess_file_type(source.content)
+
+            cat = self
+            if chat_id := source.metadata.get("chat_id"):
+                if not (stray_cat := await self._find_stray_cat(str(chat_id))):
+                    log.warning(f"Stray cat with id {chat_id} not found. Skipping file {source.path}/{source.name}")
+                    continue
+
+                cat = stray_cat
+
+            await rabbit_hole.ingest_file(
+                cat=cat,
+                file=source.content or source.name,
+                filename=source.name,
+                metadata=source.metadata or {},
+                store_file=False,
+                content_type=content_type,
+            )
+            counter += 1
+
+        log.info(f"Agent id: {self._id}. Embedded {counter} files to the vector memory")
 
     async def save_file(self, file_bytes: bytes, content_type: str, source: str, chat_id: str | None = None):
         """
@@ -277,7 +330,7 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         )
         return await StrayCat.from_cat(cat=self, user_data=user_info, stray_id=chat_id)
 
-    def has_custom_endpoint(self, path: str, methods: set[str] | List[str] | None = None):
+    def has_custom_endpoint(self, path: str, methods: set[str] | list[str] | None = None):
         """
         Check if an endpoint with the given path and methods exists in the active plugins.
 
@@ -297,7 +350,7 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         return False
 
     def plugin_exists(self, plugin_id: str):
-        return plugin_id in self.plugin_manager.plugins.keys()
+        return plugin_id in self.plugin_manager.plugins
 
     async def clone_from(self, ccat: "CheshireCat"):
         embedder = await self.embedder()
