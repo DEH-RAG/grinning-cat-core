@@ -1,4 +1,4 @@
-"""Tests for the chunk-reuse re-embed path in ``CheshireCat.embed_stored_sources``.
+"""Tests for the chunk-reuse re-embed path in ``efficient_ingestion.reembed.reembed_sources``.
 
 The embedder-change re-embed (``embed_all_in_cheshire_cats``) used to re-parse every
 source from disk/URL via ``rabbit_hole.ingest_file``. This suite pins the new
@@ -12,6 +12,7 @@ import os
 from langchain_core.documents import Document
 
 from cat.db import crud
+from cat.core_plugins.efficient_ingestion.reembed import reembed_sources
 from cat.looking_glass.models import StoredSourceWithMetadata
 from cat.rabbit_hole import RabbitHole
 from cat.services.memory.models import Record, VectorMemoryType
@@ -216,7 +217,7 @@ async def test_reuse_does_not_call_ingest_file(cheshire_cat, monkeypatch):
     ])
     ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("test.txt")],
     )
 
@@ -261,7 +262,7 @@ async def test_reuse_invokes_split_oversized(cheshire_cat, monkeypatch):
 
     monkeypatch.setattr(RabbitHole, "_split_oversized", recording_split)
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("big.txt")],
     )
 
@@ -277,7 +278,7 @@ async def test_empty_lookup_falls_back_to_ingest_file(cheshire_cat, monkeypatch)
     fake = FakeVectorHandler(points=[])  # no reusable chunks
     ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("test.txt")],
     )
 
@@ -299,7 +300,7 @@ async def test_status_processing_then_completed(cheshire_cat, monkeypatch):
 
     monkeypatch.setattr(crud, "store", recording_store)
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("test.txt")],
     )
 
@@ -334,7 +335,7 @@ async def test_one_source_failing_marks_error_others_complete(cheshire_cat, monk
 
     monkeypatch.setattr(crud, "store", fake_store)
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("good.txt"), _source("boom.txt")],
     )
 
@@ -374,7 +375,7 @@ async def test_multimodal_reembeds_image_points_via_embed_images(cheshire_cat, m
 
     monkeypatch.setattr(cheshire_cat, "_find_stray_cat", fake_find_stray_cat)
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("doc.pdf", chat_id="chat-1")],
     )
 
@@ -424,7 +425,7 @@ async def test_multimodal_missing_file_keeps_image_point_payload_only(cheshire_c
         cheshire_cat, "file_manager", FakeFileManager({root_dir: {"doc_img_0.png": None}}),
     )
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("doc.pdf")],
     )
 
@@ -464,7 +465,7 @@ async def test_nonmultimodal_keeps_image_points_payload_only(cheshire_cat, monke
 
     monkeypatch.setattr(cheshire_cat, "_find_stray_cat", fake_find_stray_cat)
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("doc.pdf", chat_id="chat-1")],
     )
 
@@ -513,7 +514,7 @@ async def test_nonmultimodal_vectorless_point_in_scroll_but_not_in_sim_recall(ch
     ])
     await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("doc.pdf")],
     )
 
@@ -553,7 +554,7 @@ async def test_multimodal_whole_image_source_reembeds_source_bytes(cheshire_cat,
         FakeFileManager({agent_id: {"photo.jpg": b"whole-image-bytes"}}),
     )
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source(source)],
     )
 
@@ -594,7 +595,7 @@ async def test_nonmultimodal_whole_image_source_kept_payload_only(cheshire_cat, 
 
     monkeypatch.setattr(cheshire_cat, "file_manager", SpyingFileManager(file_manager.files))
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("photo.jpg")],
     )
 
@@ -637,7 +638,7 @@ async def test_multimodal_reembeds_multiple_images_in_one_batch(cheshire_cat, mo
         }}),
     )
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("doc.pdf")],
     )
 
@@ -693,7 +694,7 @@ async def test_multimodal_mixed_recoverable_and_missing_images(cheshire_cat, mon
         FakeFileManager({root_dir: {"present.png": b"present-bytes", "gone.png": None}}),
     )
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("doc.pdf")],
     )
 
@@ -738,7 +739,7 @@ async def test_reuse_embed_documents_failure_preserves_old_points(cheshire_cat, 
 
     monkeypatch.setattr(crud, "store", fake_store)
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("boom.txt")],
     )
 
@@ -782,7 +783,7 @@ async def test_multimodal_embed_images_failure_preserves_old_points(cheshire_cat
 
     monkeypatch.setattr(crud, "store", fake_store)
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("fotos.txt")],
     )
 
@@ -833,7 +834,7 @@ async def test_multimodal_embed_images_truncation_is_detected(cheshire_cat, monk
 
     monkeypatch.setattr(crud, "store", fake_store)
 
-    await cheshire_cat.embed_stored_sources(
+    await reembed_sources(cheshire_cat, 
         VectorMemoryType.DECLARATIVE, [_source("galeria.txt")],
     )
 

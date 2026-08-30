@@ -1,10 +1,30 @@
-from typing import Dict
-from fastapi import APIRouter, Body, BackgroundTasks
+
+from fastapi import APIRouter, BackgroundTasks, Body
 
 from cat.auth.connection import AuthorizedInfo
-from cat.auth.permissions import AuthResource, AuthPermission, check_permissions
-from cat.routes.routes_utils import GetSettingsResponse, GetSettingResponse, UpsertSettingResponse, run_background_task
+from cat.auth.permissions import AuthPermission, AuthResource, check_permissions
+from cat.routes.routes_utils import (
+    GetSettingResponse,
+    GetSettingsResponse,
+    UpsertSettingResponse,
+    run_background_task,
+)
 from cat.services.service_factory import ServiceFactory
+
+
+async def _run_ingestion_on_embedder_change(lizard) -> None:
+    """Re-embed pass on embedder change, via the replaceable ingestion engine.
+
+    The engine is resolved through the ServiceFactory (``re-ingestion``
+    category): the core provides ``BaseIngestionConfiguration`` (upstream
+    parity) and plugins can register more efficient implementations through
+    the ``factory_allowed_ingestions`` hook.
+    """
+    from cat.services.factory.ingestion import resolve_ingestion_engine
+
+    engine = await resolve_ingestion_engine(lizard)
+    if engine is not None:
+        await engine.run(lizard)
 
 
 router = APIRouter(tags=["Embedder"], prefix="/embedder")
@@ -48,7 +68,7 @@ async def get_embedder_settings(
 async def upsert_embedder_setting(
     background_tasks: BackgroundTasks,
     embedder_name: str,
-    payload: Dict = Body(default={}),
+    payload: dict = Body(default={}),
     info: AuthorizedInfo = check_permissions(AuthResource.EMBEDDER, AuthPermission.WRITE),
 ) -> UpsertSettingResponse:
     """Upsert the Embedder setting"""
@@ -66,8 +86,13 @@ async def upsert_embedder_setting(
 
     current_embedder = await lizard.embedder()
 
-    # a characterizing feature of the embedder has been updated: inform the Cheshire Cats
+    # a characterizing feature of the embedder has been updated: run the
+    # replaceable ingestion engine (factory: re-ingestion category)
     if previous_embedder != current_embedder:
-        run_background_task(background_tasks, info.lizard.embed_all_in_cheshire_cats)
+        run_background_task(
+            background_tasks,
+            _run_ingestion_on_embedder_change,
+            info.lizard,
+        )
 
     return UpsertSettingResponse(**result)

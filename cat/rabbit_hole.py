@@ -180,7 +180,6 @@ class RabbitHole:
         """
         source = ""
         points = []
-        heartbeat_task = None
 
         try:
             await self.setup(cat)
@@ -226,12 +225,15 @@ class RabbitHole:
                 )
 
                 # keep the PROCESSING row fresh while the body runs, so a long
-                # parse is not re-claimed as stale by another worker
+                # parse is not re-claimed as stale by another worker. The
+                # heartbeat task itself is owned by the ingestion_status plugin:
+                # the core only fires the start hook.
                 scope = self.stray.id if self.stray else "agent"
                 heartbeat_interval = get_env_int("CAT_INGESTION_HEARTBEAT_SECONDS") or 30
-                from cat.core_plugins.ingestion_status.plugin import _heartbeat_status
-                heartbeat_task = asyncio.ensure_future(
-                    _heartbeat_status(self.cat.agent_key, scope, source, heartbeat_interval)
+                await self.cat.plugin_manager.execute_hook(
+                    "rabbithole_processing_heartbeat_start",
+                    source, scope, heartbeat_interval,
+                    caller=self.stray or self.cat,
                 )
 
                 # split a file into a list of docs
@@ -268,13 +270,14 @@ class RabbitHole:
                 "rabbithole_ingestion_error", source or filename, str(e), caller=self.stray or self.cat,
             )
         finally:
-            # stop the heartbeat so no orphan task keeps bumping the row
-            if heartbeat_task:
-                heartbeat_task.cancel()
-                try:
-                    await heartbeat_task
-                except asyncio.CancelledError:
-                    pass
+            # stop the plugin-owned heartbeat so no orphan task keeps bumping
+            # the row (the ingestion_status plugin cancels its task here)
+            await self.cat.plugin_manager.execute_hook(
+                "rabbithole_processing_heartbeat_stop",
+                source or filename,
+                self.stray.id if self.stray else "agent",
+                caller=self.stray or self.cat,
+            )
             # hook the points after they are stored in the vector memory
             await self.cat.plugin_manager.execute_hook(
                 "after_rabbithole_stored_documents", source, points, caller=self.stray or self.cat,

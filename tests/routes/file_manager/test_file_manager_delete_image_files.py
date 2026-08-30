@@ -38,10 +38,15 @@ async def test_delete_file_removes_source_image_files(monkeypatch):
             removed_files.append(file_path)
             return True
 
+    class FakePluginManager:
+        async def execute_hook(self, name, *args, caller=None):
+            return None
+
     fake_cheshire_cat = types.SimpleNamespace(
         agent_key="agent",
         vector_memory_handler=handler,
         file_manager=FakeFileManager(),
+        plugin_manager=FakePluginManager(),
     )
     fake_info = types.SimpleNamespace(cheshire_cat=fake_cheshire_cat, stray_cat=None)
 
