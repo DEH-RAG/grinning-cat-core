@@ -10,7 +10,6 @@ from cat.db.database import DEFAULT_SYSTEM_KEY
 from cat.rabbit_hole import RabbitHole
 from cat.services.factory.embedder import MultimodalEmbeddings
 from cat.services.memory.models import VectorMemoryType
-
 from tests.utils import agent_id
 
 
@@ -46,44 +45,12 @@ class PartialFailMultimodalEmbedder(FakeMultimodalEmbedder):
 
 
 
-async def _multimodal(self):  # noqa: ANN001
-    return True
-
-
-async def _text_only(self):  # noqa: ANN001
-    return False
-
-
 def _image_payload(data: bytes, mime: str = "image/jpeg") -> dict:
     return {
         "image_base64": base64.b64encode(data).decode(),
         "image_bytes": data,
         "image_mime_type": mime,
     }
-
-
-def test_collect_document_images():
-    rabbit_hole = RabbitHole()
-
-    docs = [
-        Document(page_content="plain text, no images"),
-        Document(page_content="image element", metadata={"image_base64": "aGVsbG8=", "image_mime_type": "image/png"}),
-    ]
-
-    images = rabbit_hole._collect_document_images(docs)
-
-    assert len(images) == 1
-    assert images[0]["image_bytes"] == b"hello"
-    assert images[0]["image_mime_type"] == "image/png"
-
-
-def test_collect_document_images_defaults_mime():
-    rabbit_hole = RabbitHole()
-
-    docs = [Document(page_content="image", metadata={"image_base64": "aGVsbG8="})]
-    images = rabbit_hole._collect_document_images(docs)
-
-    assert images[0]["image_mime_type"] == "image/jpeg"
 
 
 async def test_store_documents_multimodal_embeds_and_stores_images(cheshire_cat, monkeypatch):
@@ -97,7 +64,6 @@ async def test_store_documents_multimodal_embeds_and_stores_images(cheshire_cat,
         return FakeMultimodalEmbedder()
 
     # Force multimodal detection and swap the embedder + the vector memory storage.
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
 
@@ -160,7 +126,6 @@ async def test_store_documents_multimodal_uses_agent_embedder(cheshire_cat, monk
     async def fake_embedder():
         return RecordingEmbedder()
 
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
 
@@ -205,7 +170,6 @@ async def test_store_documents_multimodal_in_conversation_adds_chat_id(cheshire_
     async def fake_embedder():
         return FakeMultimodalEmbedder()
 
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
     monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
@@ -246,7 +210,6 @@ async def test_store_documents_multimodal_image_source_does_not_duplicate(cheshi
     async def fake_embedder():
         return FakeMultimodalEmbedder()
 
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
     monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
@@ -291,7 +254,6 @@ async def test_store_documents_skips_none_image_vectors(cheshire_cat, monkeypatc
     async def fake_save_file(file_bytes, content_type, source, chat_id=None):
         saved_files.append((file_bytes, content_type, source, chat_id))
 
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
     monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
@@ -337,7 +299,6 @@ async def test_store_documents_whole_image_none_embed_skipped(cheshire_cat, monk
     async def fake_embedder():
         return PartialFailMultimodalEmbedder()
 
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
     monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
@@ -368,7 +329,6 @@ async def test_store_documents_text_only_ignores_images(cheshire_cat, monkeypatc
         stored["points"] = points
 
     # detection reports a text-only embedder
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _text_only)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
 
     rabbit_hole = RabbitHole()
@@ -402,7 +362,6 @@ async def test_store_documents_embedding_runs_in_ingestion_executor(cheshire_cat
         return [[0.1] * 4 for _ in range(2)]
 
     # detection reports a text-only embedder so only the text-embedding lane runs
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _text_only)
     monkeypatch.setattr("cat.rabbit_hole.run_in_ingestion_executor", fake_run_in_ingestion_executor)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
 
@@ -443,7 +402,6 @@ async def test_text_points_do_not_carry_image_base64(cheshire_cat, monkeypatch):
     async def fake_save_file(file_bytes, content_type, source, chat_id=None):
         return source
 
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _multimodal)
     monkeypatch.setattr(cheshire_cat.lizard, "embedder", fake_embedder)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
     monkeypatch.setattr(cheshire_cat, "save_file", fake_save_file)
@@ -486,10 +444,13 @@ async def test_is_multimodal_embedder_uses_lizard_context(cheshire_cat, monkeypa
 
     The ``factory_allowed_embedders`` hooks are declared with a ``lizard`` parameter
     (core base_plugin and PLUS alike): ``MadHatter.context_execute_hook`` passes the
-    caller under that keyword only when the executing plugin manager belongs to
+    caller under that keyword only when the executing manager belongs to
     BillTheLizard. Using an agent plugin manager would pass ``cat`` and make the
     hooks raise ``TypeError: unexpected keyword argument 'cat'``.
+
+    Moved to the multimodal_ingestion plugin (``is_multimodal_embedder_active``).
     """
+    from cat.core_plugins.multimodal_ingestion import ingestion as mmi
     captured = {}
 
     class FakeServiceFactory:
@@ -501,12 +462,9 @@ async def test_is_multimodal_embedder_uses_lizard_context(cheshire_cat, monkeypa
         async def get_config_class_from_adapter(self, obj):
             return None
 
-    monkeypatch.setattr("cat.rabbit_hole.ServiceFactory", FakeServiceFactory)
+    monkeypatch.setattr("cat.services.service_factory.ServiceFactory", FakeServiceFactory)
 
-    rabbit_hole = RabbitHole()
-    rabbit_hole.cat = cheshire_cat
-
-    assert await rabbit_hole._is_multimodal_embedder() is False
+    assert await mmi.is_multimodal_embedder_active(cheshire_cat) is False
 
     assert captured["agent_key"] == DEFAULT_SYSTEM_KEY
     assert captured["plugin_manager_agent_key"] == DEFAULT_SYSTEM_KEY
@@ -544,7 +502,6 @@ async def test_file_to_docs_parse_runs_off_event_loop(cheshire_cat, monkeypatch)
         return docs
 
     monkeypatch.setattr(RabbitHole, "_split_text", fake_split)
-    monkeypatch.setattr(RabbitHole, "_is_multimodal_embedder", _text_only)
 
     await rabbit_hole._file_to_docs(
         file=BytesIO(b"hello world"), filename="test.txt", content_type="text/plain",

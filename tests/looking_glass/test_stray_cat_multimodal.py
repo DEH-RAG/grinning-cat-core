@@ -1,4 +1,5 @@
-"""Tests for ``StrayCat._attach_recalled_images`` and image rendering in ``CoreAgenticWorkflow``.
+"""Tests for the multimodal recall logic (now in the ``multimodal_ingestion`` plugin)
+and image rendering in ``CoreAgenticWorkflow``.
 
 Todo 6 of the multimodal-images-to-llm plan: pin the behavior of the seam that
 recovers recalled multimodal memory images (``metadata.image is True``) from the
@@ -14,17 +15,14 @@ passed to the LLM).
 import base64
 from io import BytesIO
 
-from PIL import Image
 from langchain_core.documents import Document as LangChainDocument
 from langchain_core.prompts import ChatPromptTemplate
+from PIL import Image
 
+from cat.core_plugins.multimodal_ingestion import recall as mm_recall
 from cat.looking_glass.models import AgenticWorkflowOutput, AgenticWorkflowTask
 from cat.services.factory.agentic_workflow import CoreAgenticWorkflow
-from cat.services.factory.embedder import (
-    MAX_IMAGE_TOTAL_BYTES,
-    MAX_IMAGES_PER_TURN,
-    MultimodalEmbeddings,
-)
+from cat.services.factory.embedder import MultimodalEmbeddings
 from cat.services.memory.models import DocumentRecall
 
 # A real 1x1 PNG so base64 decode and Pillow ``Image.open`` both work.
@@ -93,7 +91,7 @@ async def test_happy_path_attaches_data_uri(stray_no_memory):
     read_calls = []
     stray.file_manager.read_file = lambda name, root_dir=None: (read_calls.append((name, root_dir)) or PNG_BYTES)
 
-    images = await stray._attach_recalled_images(FakeMultimodalEmbedder())
+    images = await mm_recall.build_recalled_images(stray, FakeMultimodalEmbedder())
 
     assert len(images) == 1
     part = images[0]
@@ -110,41 +108,41 @@ async def test_happy_path_attaches_data_uri(stray_no_memory):
 
 async def test_non_multimodal_embedder_returns_empty(stray_no_memory):
     stray = _make_stray(stray_no_memory)
-    images = await stray._attach_recalled_images(FakeTextEmbedder())
+    images = await mm_recall.build_recalled_images(stray, FakeTextEmbedder())
     assert images == []
 
 
 async def test_missing_file_returns_empty(stray_no_memory):
     stray = _make_stray(stray_no_memory, read_result=None)
-    images = await stray._attach_recalled_images(FakeMultimodalEmbedder())
+    images = await mm_recall.build_recalled_images(stray, FakeMultimodalEmbedder())
     assert images == []
 
 
 async def test_vision_hook_false_returns_empty(stray_no_memory):
     stray = _make_stray(stray_no_memory, vision=False)
-    images = await stray._attach_recalled_images(FakeMultimodalEmbedder())
+    images = await mm_recall.build_recalled_images(stray, FakeMultimodalEmbedder())
     assert images == []
 
 
 async def test_no_image_recalls_returns_empty(stray_no_memory):
     stray = _make_stray(stray_no_memory, recalls=[])
-    images = await stray._attach_recalled_images(FakeMultimodalEmbedder())
+    images = await mm_recall.build_recalled_images(stray, FakeMultimodalEmbedder())
     assert images == []
 
 
 async def test_count_cap_enforced(stray_no_memory):
-    recalls = [_image_recall(f"x{i}.png", recall_id=f"doc{i}") for i in range(MAX_IMAGES_PER_TURN + 3)]
+    recalls = [_image_recall(f"x{i}.png", recall_id=f"doc{i}") for i in range(mm_recall.MAX_IMAGES_PER_TURN + 3)]
     stray = _make_stray(stray_no_memory, recalls=recalls)
-    images = await stray._attach_recalled_images(FakeMultimodalEmbedder())
-    assert len(images) == MAX_IMAGES_PER_TURN
+    images = await mm_recall.build_recalled_images(stray, FakeMultimodalEmbedder())
+    assert len(images) == mm_recall.MAX_IMAGES_PER_TURN
 
 
 async def test_total_bytes_cap_enforced(stray_no_memory):
     # each image is bigger than half the total budget, so the second must be dropped
-    big = b"x" * (MAX_IMAGE_TOTAL_BYTES // 2 + 1)
+    big = b"x" * (mm_recall.MAX_IMAGE_TOTAL_BYTES // 2 + 1)
     recalls = [_image_recall(f"big{i}.png", recall_id=f"doc{i}") for i in range(3)]
     stray = _make_stray(stray_no_memory, read_result=big, recalls=recalls)
-    images = await stray._attach_recalled_images(FakeMultimodalEmbedder())
+    images = await mm_recall.build_recalled_images(stray, FakeMultimodalEmbedder())
     assert len(images) == 1
 
 
@@ -153,7 +151,7 @@ async def test_chat_id_metadata_uses_chat_root_dir(stray_no_memory):
     read_calls = []
     stray.file_manager.read_file = lambda name, root_dir=None: (read_calls.append((name, root_dir)) or PNG_BYTES)
 
-    images = await stray._attach_recalled_images(FakeMultimodalEmbedder())
+    images = await mm_recall.build_recalled_images(stray, FakeMultimodalEmbedder())
 
     assert len(images) == 1
     assert read_calls == [("x.png", f"{stray.agent_key}/chat-1")]
