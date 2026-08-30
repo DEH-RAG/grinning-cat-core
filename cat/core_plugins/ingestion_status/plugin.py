@@ -12,6 +12,7 @@ import asyncio
 from cat import hook
 from cat.core_plugins.ingestion_status.registry import (
     IngestionStatus,
+    clear_agent,
     delete_status,
     get_status,
     set_status,
@@ -207,3 +208,14 @@ async def after_file_manager_file_deleted(filename: str, scope: str, cat) -> Non
     if not agent_id:
         return
     await delete_status(agent_id, scope, filename)
+
+
+@hook(priority=0)
+async def after_cheshire_cat_destroy(agent_id: str, cat) -> None:
+    """Drop every ingestion-status row of a destroyed agent.
+
+    Fired by ``CheshireCat.destroy()`` once the agent's resources are gone;
+    the whole ``agents:<agent_id>:ingestion:*`` namespace belongs to this
+    plugin, so the cleanup lives here (the core only fires the hook).
+    """
+    await clear_agent(agent_id)
