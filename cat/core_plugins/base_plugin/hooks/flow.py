@@ -257,6 +257,24 @@ def after_cheshire_cat_creation(cat: CheshireCat, lizard: BillTheLizard) -> None
 
 
 @hook(priority=0)
+def after_cheshire_cat_destroy(agent_id: str, cat) -> None:
+    """
+    Hook triggered after a CheshireCat instance has been destroyed.
+
+    Fired by ``CheshireCat.destroy()`` once every agent-scoped resource
+    (memories, file storage, settings, conversations, plugins, users) has been
+    removed, but before the cat's plugin manager is torn down, so plugins can
+    still run cleanup on their own namespaces (e.g. dropping per-agent status
+    rows owned by the plugin). No-op default.
+
+    Args:
+        agent_id: The id of the destroyed agent.
+        cat: The CheshireCat instance being destroyed (still usable for cleanup).
+    """
+    pass
+
+
+@hook(priority=0)
 def after_all_cheshire_cats_embedded(success: bool, lizard: BillTheLizard) -> None:
     """
     Hook triggered after all CheshireCat instances have been embedded. This function allows for any post-processing or

@@ -200,12 +200,27 @@ async def install_plugin_from_registry(
     return InstallPluginFromRegistryResponse(url=payload["url"], info="Plugin is being installed asynchronously")
 
 
-# NOTE: the former core system-level plugin settings routes
-# (GET /plugins/system/settings, GET/PUT /plugins/system/settings/{plugin_id})
-# have been moved into the mgmt_message plugin itself
-# (see cat/core_plugins/mgmt_message/endpoints.py: GET/PUT /mgmt_message/settings
-# and the public GET /mgmt_message/global_message). Same storage (system:agent
-# settings list via cat.db.crud), same permissions (SYSTEM READ/WRITE).
+@router.get("/system/settings", response_model=PluginsSettingsResponse)
+async def get_lizard_plugins_settings(
+    info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.READ),
+) -> PluginsSettingsResponse:
+    """Returns the default settings of all the plugins"""
+    lizard = info.lizard
+    return await get_plugins_settings(lizard.plugin_manager, lizard.agent_key)   # type: ignore[arg-type]
+
+
+@router.get("/system/settings/{plugin_id}", response_model=GetSettingResponse)
+async def get_lizard_plugin_settings(
+    plugin_id: str,
+    info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.READ),
+) -> GetSettingResponse:
+    """Returns the default settings of a specific plugin"""
+    lizard = info.lizard
+    plugin_manager = lizard.plugin_manager
+    if not plugin_manager.plugin_exists(plugin_id):
+        raise CustomNotFoundException("Plugin not found")
+
+    return await get_plugin_settings(plugin_manager, plugin_id, lizard.agent_key)   # type: ignore[arg-type]
 
 
 @router.get("/system/details/{plugin_id}", response_model=GetPluginDetailsResponse)

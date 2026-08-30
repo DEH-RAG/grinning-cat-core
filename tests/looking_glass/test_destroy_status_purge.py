@@ -22,7 +22,8 @@ async def test_destroy_purges_ingestion_status_keys(cheshire_cat):
 
     await cheshire_cat.destroy()
 
-    # the destroyed agent's ingestion keys are gone
+    # the destroyed agent's ingestion keys are gone (purged by the
+    # ingestion_status plugin via the after_cheshire_cat_destroy hook)
     assert await crud.read(status_key) is None
 
     # other agents' keys remain untouched

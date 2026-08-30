@@ -5,7 +5,6 @@ import uuid
 from io import BytesIO
 
 from cat.auth.permissions import AuthUserInfo
-from cat.db import crud
 from cat.db.cruds import (
     conversations as crud_conversations,
 )
@@ -114,15 +113,20 @@ class CheshireCat(BotMixin, NonCopyableMixin):
         # remove the folder from storage
         self.file_manager.remove_folder(self._id)
 
-        await self.shutdown()
-
         await crud_settings.destroy_all(self._id)
         await crud_conversations.destroy_all(self._id)
         await crud_plugins.destroy_all(self._id)
         await crud_users.destroy_all(self._id)
 
-        # purge ingestion status registry keys (namespace owned by the ingestion-status plugin)
-        await crud.destroy(f"agents:{self.agent_key}:ingestion:*")
+        # notify plugins the agent has been destroyed (before shutdown tears down
+        # the plugin manager), so plugin-owned namespaces can be cleaned up —
+        # e.g. ingestion_status drops its agents:<id>:ingestion:* registry rows
+        if self.plugin_manager is not None:
+            await self.plugin_manager.execute_hook(
+                "after_cheshire_cat_destroy", self._id, caller=self,
+            )
+
+        await self.shutdown()
 
     async def get_stored_sources_with_metadata(self) -> dict[VectorMemoryType, list[StoredSourceWithMetadata]]:
         """Get all stored files with their metadata."""
