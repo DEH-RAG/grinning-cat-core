@@ -1,20 +1,19 @@
 import os
 from io import BytesIO
-from typing import Dict, List, Tuple
-from fastapi import APIRouter, Body, BackgroundTasks
+
+from fastapi import APIRouter, BackgroundTasks, Body
 from pydantic import BaseModel
 from starlette.responses import StreamingResponse
 
 from cat.auth.connection import AuthorizedInfo
-from cat.auth.permissions import AuthResource, AuthPermission, check_permissions
+from cat.auth.permissions import AuthPermission, AuthResource, check_permissions
 from cat.exceptions import CustomNotFoundException, CustomValidationException
-from cat.log import log
 from cat.routes.routes_utils import (
-    GetSettingsResponse,
     GetSettingResponse,
+    GetSettingsResponse,
     UpsertSettingResponse,
-    sanitize_source_name,
     run_background_task,
+    sanitize_source_name,
 )
 from cat.services.factory.file_manager import FileResponse
 from cat.services.memory.models import VectorMemoryType
@@ -28,11 +27,11 @@ class FileManagerDeletedFiles(BaseModel):
 
 
 class FileManagerAttributes(BaseModel):
-    files: List[FileResponse]
+    files: list[FileResponse]
     size: int
 
 
-def get_from_info(info: AuthorizedInfo) -> Tuple[str, VectorMemoryType, Dict]:
+def get_from_info(info: AuthorizedInfo) -> tuple[str, VectorMemoryType, dict]:
     ccat = info.cheshire_cat
     path = ccat.agent_key  # type: ignore[union-attr]
     if info.stray_cat:
@@ -82,7 +81,7 @@ async def get_file_manager_settings(
 async def upsert_file_manager_setting(
     background_tasks: BackgroundTasks,
     file_manager_name: str,
-    payload: Dict = Body(default={}),
+    payload: dict = Body(default={}),
     info: AuthorizedInfo = check_permissions(AuthResource.FILE_MANAGER, AuthPermission.WRITE),
 ) -> UpsertSettingResponse:
     """Upsert the File Manager setting"""
@@ -158,10 +157,15 @@ async def delete_file(
         # delete the file from the file storage
         res = info.cheshire_cat.file_manager.remove_file(os.path.join(path, sanitized_source))
 
-        # remove the extracted-image files of this source before the memory
-        # points are deleted (their metadata records the file names)
-        await _delete_source_image_files(
-            info.cheshire_cat, str(collection_id), path, source_name,
+        # the file is gone from storage: notify the plugins BEFORE the memory
+        # points are deleted so multimodal_ingestion can cascade-remove the
+        # extracted-image files (their names live in the point metadata)
+        chat_or_agent = path.split(os.sep, 1)[1] if os.sep in path else "agent"
+        await info.cheshire_cat.plugin_manager.execute_hook(
+            "before_file_manager_file_delete",
+            sanitized_source,
+            str(chat_or_agent),
+            caller=info.cheshire_cat,
         )
 
         # delete points
@@ -170,7 +174,6 @@ async def delete_file(
         # the file is gone: notify the plugins so a stale ingestion-status row
         # cannot linger (the row is owned by the ingestion_status plugin; the
         # core only fires the deletion hook)
-        chat_or_agent = path.split(os.sep, 1)[1] if os.sep in path else "agent"
         await info.cheshire_cat.plugin_manager.execute_hook(
             "after_file_manager_file_deleted",
             sanitized_source,
@@ -181,28 +184,6 @@ async def delete_file(
         return FileManagerDeletedFiles(deleted=res)
     except Exception as e:
         raise CustomValidationException(f"Failed to delete memory points: {e}")
-
-
-async def _delete_source_image_files(cheshire_cat, collection_id: str, path: str, source_name: str) -> None:
-    """Remove every stored image file extracted from ``source_name``.
-
-    Image points carry ``metadata.image == True`` and the saved file name in
-    ``metadata.image_file``; query them by source before the points are deleted
-    and remove the corresponding files from the agent storage. Works with any
-    BaseVectorDatabaseHandler implementation (Qdrant or the Neo4j GraphRAG one).
-    """
-    offset = None
-    while True:
-        points, offset = await cheshire_cat.vector_memory_handler.get_all_tenant_points(
-            collection_name=collection_id, limit=100, offset=offset,
-            metadata={"source": source_name, "image": True},
-        )
-        for point in points:
-            image_file = (point.payload or {}).get("metadata", {}).get("image_file")
-            if image_file:
-                cheshire_cat.file_manager.remove_file(os.path.join(path, image_file))
-        if offset is None:
-            break
 
 
 @router.delete("/files")

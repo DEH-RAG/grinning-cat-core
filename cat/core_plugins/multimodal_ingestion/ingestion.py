@@ -117,6 +117,28 @@ def image_file_name(source: str, index: int, mime_type: str, image_bytes: bytes)
     return f"{stem}_img_{index}_{digest}{ext}"
 
 
+async def delete_source_image_files(cat, collection_id: str, path: str, source_name: str) -> None:
+    """Remove every stored image file extracted from ``source_name``.
+
+    Image points carry ``metadata.image == True`` and the saved file name in
+    ``metadata.image_file``; query them by source before the points are deleted
+    and remove the corresponding files from the agent storage. Works with any
+    BaseVectorDatabaseHandler implementation (Qdrant or the Neo4j GraphRAG one).
+    """
+    offset = None
+    while True:
+        points, offset = await cat.vector_memory_handler.get_all_tenant_points(
+            collection_name=collection_id, limit=100, offset=offset,
+            metadata={"source": source_name, "image": True},
+        )
+        for point in points:
+            image_file = (point.payload or {}).get("metadata", {}).get("image_file")
+            if image_file:
+                cat.file_manager.remove_file(os.path.join(path, image_file))
+        if offset is None:
+            break
+
+
 async def build_image_points(
     cat,
     images: list[dict],
