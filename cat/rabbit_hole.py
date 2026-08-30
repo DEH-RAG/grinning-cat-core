@@ -8,18 +8,17 @@ import time
 import uuid
 from contextlib import asynccontextmanager
 from io import BytesIO
-from typing import List, Dict, Tuple
+from typing import Dict, List, Tuple
+
 from httpx import AsyncClient
 from langchain_community.document_loaders.parsers.generic import MimeTypeBasedParser
-from langchain_core.documents.base import Document, Blob
+from langchain_core.documents.base import Blob, Document
 
 from cat.env import get_env_int
 from cat.log import log
 from cat.services.factory.chunker import BaseChunker
-from cat.services.ingestion_executor import run_in_ingestion_executor
-from cat.services.memory.models import VectorMemoryType, PointStruct
+from cat.services.memory.models import PointStruct, VectorMemoryType
 from cat.utils import is_url as fnc_is_url
-
 
 # Process-wide semaphore bounding concurrent ``ingest_file`` executions.
 # Created lazily on first use; the size is read at runtime from
@@ -375,6 +374,22 @@ class RabbitHole:
         fb = await asyncio.to_thread(lambda: open(file, "rb").read())  # type: ignore[union-attr]
         return sanitize_filename(os.path.basename(file)), fb, mimetypes.guess_type(file)[0], False  # type: ignore[return-value]
 
+    async def _run_in_ingestion_executor(self, func, *args):
+        """Run a heavy ingestion callable via the dedicated ingestion lane.
+
+        Dispatches through the ``run_in_ingestion_executor`` hook: when a plugin
+        (efficient_ingestion) provides a dedicated low-concurrency pool the
+        callable runs there; otherwise falls back to the default executor
+        (upstream parity via ``asyncio.to_thread``).
+        """
+        task = func if not args else (lambda: func(*args))
+        result = await self.cat.plugin_manager.execute_hook(
+            "run_in_ingestion_executor", None, task, caller=self.cat,
+        )
+        if result is None:
+            result = await asyncio.to_thread(task)
+        return result
+
     async def _parse_to_docs(
         self, source: str, file_bytes: bytes, content_type: str | None
     ) -> Tuple[List[Document], List[Dict]]:
@@ -399,7 +414,7 @@ class RabbitHole:
         # Load the bytes in the Blob schema and parse the content. Parser based on the mime type.
         # The parser is CPU/IO-bound (e.g. PyMuPDF on a large PDF): run it off the event loop.
         await self._send_notification_message("I'm parsing the content. Big content could require some minutes...")
-        super_docs = await run_in_ingestion_executor(
+        super_docs = await self._run_in_ingestion_executor(
             lambda: MimeTypeBasedParser(handlers=fh).parse(
                 Blob(data=file_bytes, mimetype=content_type).from_data(data=file_bytes, mime_type=content_type, path=source)
             )
@@ -504,7 +519,7 @@ class RabbitHole:
 
         # hook the points before they are stored in the vector memory
         valid_documents = list(filter(lambda doc_: doc_.page_content.strip(), docs))
-        storing_vectors = await run_in_ingestion_executor(
+        storing_vectors = await self._run_in_ingestion_executor(
             lambda: embedder.embed_documents([doc_.page_content for doc_ in valid_documents])
         )
         points = [PointStruct(

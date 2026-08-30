@@ -356,13 +356,13 @@ async def test_store_documents_embedding_runs_in_ingestion_executor(cheshire_cat
     async def fake_add_points(collection_name, points):
         stored["points"] = points
 
-    async def fake_run_in_ingestion_executor(func, *args, **kwargs):
+    async def fake_run_in_ingestion_executor(self, func, *args):
         # Record the deferred embedding callable and return a fixed vector list.
         calls["deferred_callables"].append(func)
         return [[0.1] * 4 for _ in range(2)]
 
     # detection reports a text-only embedder so only the text-embedding lane runs
-    monkeypatch.setattr("cat.rabbit_hole.run_in_ingestion_executor", fake_run_in_ingestion_executor)
+    monkeypatch.setattr(RabbitHole, "_run_in_ingestion_executor", fake_run_in_ingestion_executor)
     monkeypatch.setattr(cheshire_cat.vector_memory_handler, "add_points_to_tenant", fake_add_points)
 
     rabbit_hole = RabbitHole()
@@ -480,7 +480,7 @@ async def test_file_to_docs_parse_runs_off_event_loop(cheshire_cat, monkeypatch)
     """
     calls = {"deferred_callables": [], "parse_calls": 0}
 
-    async def fake_run_in_ingestion_executor(func, *args, **kwargs):
+    async def fake_run_in_ingestion_executor(self, func, *args):
         # Record the deferred callable but do NOT run it: the test asserts the
         # parse is deferred, then invokes the callable itself to prove it.
         calls["deferred_callables"].append(func)
@@ -490,7 +490,7 @@ async def test_file_to_docs_parse_runs_off_event_loop(cheshire_cat, monkeypatch)
         calls["parse_calls"] += 1
         return [Document(page_content="parsed content")]
 
-    monkeypatch.setattr("cat.rabbit_hole.run_in_ingestion_executor", fake_run_in_ingestion_executor)
+    monkeypatch.setattr(RabbitHole, "_run_in_ingestion_executor", fake_run_in_ingestion_executor)
     monkeypatch.setattr(MimeTypeBasedParser, "parse", fake_parse)
 
     rabbit_hole = RabbitHole()

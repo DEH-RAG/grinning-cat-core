@@ -17,6 +17,9 @@ import uuid
 
 from langchain_core.documents import Document
 
+from cat.core_plugins.efficient_ingestion.ingestion_executor import (
+    run_in_ingestion_executor,
+)
 from cat.core_plugins.ingestion_status.registry import (
     PHASE_EMBEDDING,
     PHASE_PARSING_CHUNKING,
@@ -32,7 +35,6 @@ from cat.log import log
 from cat.looking_glass.models import StoredSourceWithMetadata
 from cat.services.factory.embedder import is_multimodal_embedder
 from cat.services.factory.ingestion import BaseIngestionEngine
-from cat.services.ingestion_executor import run_in_ingestion_executor
 from cat.services.memory.models import PointStruct, VectorMemoryType
 from cat.utils import get_nlp_object_name, guess_file_type, is_url
 
