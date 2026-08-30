@@ -9,14 +9,11 @@ classes). A fake handler implementing the interface stands in for the vector DB.
 import hashlib
 import os
 
-from langchain_core.documents import Document
-
-from cat.db import crud
 from cat.core_plugins.efficient_ingestion.reembed import reembed_sources
+from cat.db import crud
 from cat.looking_glass.models import StoredSourceWithMetadata
 from cat.rabbit_hole import RabbitHole
 from cat.services.memory.models import Record, VectorMemoryType
-
 from tests.utils import agent_id
 
 
@@ -933,5 +930,110 @@ async def test_completed_chunker_mismatch_full_reingest(cheshire_cat, monkeypatc
     await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
 
     # full re-ingest, not chunk-reuse
+    assert ingest_calls == ["test.txt"]
+    assert fake.added == []
+
+
+async def test_inflight_embedding_phase_resumes_chunk_reuse(cheshire_cat, monkeypatch):
+    """[restart] A processing row recorded at ``embedding`` (crash/restart mid-pass)
+    resumes with chunk-reuse, NOT a full re-ingest: the chunks are valid, only the
+    vectors need recomputing."""
+    from cat.core_plugins.ingestion_status.registry import (
+        PHASE_EMBEDDING,
+        IngestionStatus,
+        set_status,
+    )
+    from cat.utils import get_nlp_object_name
+
+    fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
+    ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+    chunker = getattr(cheshire_cat, "chunker", None)
+    chunker_name = (
+        str(chunker.name) if chunker is not None and getattr(chunker, "name", None) else
+        get_nlp_object_name(chunker, "default_chunker")
+    )
+    # a previous pass crashed while embedding: processing + phase=embedding
+    await set_status(
+        agent_id, "agent", "test.txt",
+        type_="file", status=IngestionStatus.PROCESSING,
+        phase=PHASE_EMBEDDING, embedder_name="FakeEmbedder", chunker_name=chunker_name,
+    )
+
+    writes = []
+    async def recording_store(key, value, path="$", nx=False, xx=False, expire=None):
+        writes.append((key, value))
+        return value
+    monkeypatch.setattr(crud, "store", recording_store)
+
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+
+    # resumes from embedding: chunk-reuse (no re-parse), points re-stored
+    assert ingest_calls == []
+    assert len(fake.added) == 1
+    assert fake.deleted == [(str(VectorMemoryType.DECLARATIVE), {"source": "test.txt"})]
+
+    # the row transitions (claim/phase writes are processing) and ends completed
+    key = _status_key("test.txt")
+    statuses = [
+        (v["status"].value if hasattr(v["status"], "value") else v["status"])
+        for k, v in writes if k == key
+    ]
+    assert statuses[-1] == "completed"
+    assert "processing" in statuses
+
+
+async def test_inflight_parsing_phase_resumes_full_reingest(cheshire_cat, monkeypatch):
+    """[restart] A processing row recorded at ``parsing_chunking`` resumes with a
+    full re-ingest (the text was mid-parse/chunk when the pass died)."""
+    from cat.core_plugins.ingestion_status.registry import (
+        PHASE_PARSING_CHUNKING,
+        IngestionStatus,
+        set_status,
+    )
+    from cat.utils import get_nlp_object_name
+
+    fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
+    ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+    chunker = getattr(cheshire_cat, "chunker", None)
+    chunker_name = (
+        str(chunker.name) if chunker is not None and getattr(chunker, "name", None) else
+        get_nlp_object_name(chunker, "default_chunker")
+    )
+    await set_status(
+        agent_id, "agent", "test.txt",
+        type_="file", status=IngestionStatus.PROCESSING,
+        phase=PHASE_PARSING_CHUNKING, chunker_name=chunker_name,
+    )
+
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+
+    # full re-ingest, not chunk-reuse
+    assert ingest_calls == ["test.txt"]
+    assert fake.added == []
+
+
+async def test_inflight_embedding_phase_chunker_mismatch_full_reingest(cheshire_cat, monkeypatch):
+    """[chunker change] A processing row recorded at ``embedding`` whose chunker
+    differs from the current one must NOT chunk-reuse: the stored chunks were
+    produced by the OLD chunker, so it falls back to a full re-ingest
+    (parsing_chunking) even though the recorded phase is embedding."""
+    from cat.core_plugins.ingestion_status.registry import (
+        PHASE_EMBEDDING,
+        IngestionStatus,
+        set_status,
+    )
+
+    fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
+    ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+    # row was re-embedding (embedding phase) when the chunker changed
+    await set_status(
+        agent_id, "agent", "test.txt",
+        type_="file", status=IngestionStatus.PROCESSING,
+        phase=PHASE_EMBEDDING, embedder_name="FakeEmbedder", chunker_name="OldChunker",
+    )
+
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+
+    # full re-ingest (chunks invalidated by the chunker change), not chunk-reuse
     assert ingest_calls == ["test.txt"]
     assert fake.added == []
