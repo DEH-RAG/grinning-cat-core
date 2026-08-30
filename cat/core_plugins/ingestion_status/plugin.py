@@ -10,7 +10,11 @@ Lifecycle written by these hooks:
 import asyncio
 
 from cat import hook
-from cat.core_plugins.ingestion_status.registry import IngestionStatus, get_status, set_status
+from cat.core_plugins.ingestion_status.registry import (
+    IngestionStatus,
+    get_status,
+    set_status,
+)
 
 
 def _scope_and_chat(cat):
@@ -146,3 +150,18 @@ async def rabbithole_ingestion_error(source, error, cat) -> None:
         chat_id=chat_id,
         error=str(error),
     )
+
+@hook(priority=0)
+async def after_embedder_settings_update(embedder_name: str, embedder_size: int, lizard) -> None:
+    """Re-embed every agent's stored sources and procedures on embedder change.
+
+    This plugin owns the re-embed engine (``ingestion_status.reembed``): the
+    core only fires the hook, so when this plugin is loaded the re-embed runs
+    on every embedder change, and nothing happens otherwise.
+    """
+    # lazy import: keeps module load order simple and side-effect free
+    from cat.core_plugins.ingestion_status.reembed import reembed_all
+
+    if lizard is None:
+        return
+    await reembed_all(lizard, embedder_name, embedder_size)

@@ -191,7 +191,7 @@ class StrayCat(BotMixin, NonCopyableMixin):
                     continue
 
                 # Same agent_key[/chat_id] layout as CheshireCat.save_file and
-                # embed_stored_sources.
+                # re-embed handled by the ingestion_status plugin (core_plugins/ingestion_status/reembed.py).
                 root_dir = self.agent_key
                 if chat_id := metadata.get("chat_id"):
                     root_dir = os.path.join(root_dir, str(chat_id))

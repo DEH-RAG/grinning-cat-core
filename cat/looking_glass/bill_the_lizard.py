@@ -221,55 +221,6 @@ class BillTheLizard(OrchestratorMixin, NonCopyableMixin):
 
         return cloned_ccat  # type: ignore[return-value]
 
-    async def embed_all_in_cheshire_cats(self) -> None:
-        """Re-embeds all the stored files and procedures in all the Cheshire Cats using the current embedder."""
-        async def embed_with_limit(entry_):
-            async with semaphore:
-                # re-embed all the stored files
-                tasks = [
-                    entry_["ccat"].embed_stored_sources(collection_name, sources)
-                    for collection_name, sources in entry_["stored_sources"].items()
-                    if sources
-                ] + [entry_["ccat"].embed_procedures()]
-                await asyncio.gather(*tasks)
-
-        success = False
-        try:
-            embedder = await self.embedder()
-            embedder_name = embedder.name
-            embedder_size = embedder.size
-
-            ccat_ids = await crud_settings.get_agents_main_keys()
-            stored_files_by_ccat: List[Dict] = []
-            # first, I need to get all the stored files from all the Cheshire Cats with the metadata stored
-            # within the vector memory; I do not remove anything from the latter to avoid any race condition
-            for ccat_id in ccat_ids:
-                if (ccat := await self.get_cheshire_cat(ccat_id)) is None:
-                    continue
-
-                stored_files_by_ccat.append({
-                    "ccat": ccat,
-                    "stored_sources": await ccat.get_stored_sources_with_metadata(),
-                })
-
-            # now, I have to re-initialize all the vector databases in a serialized way, outside threads to avoid
-            # race conditions
-            for entry in stored_files_by_ccat:
-                await entry["ccat"].vector_memory_handler.initialize(embedder_name, embedder_size)
-
-                # finally, I can re-embed all the stored files in an asynchronous way
-                # limit concurrent embeddings to avoid overwhelming resources
-                semaphore = asyncio.Semaphore(5)  # Max 5 concurrent
-                await asyncio.gather(*[embed_with_limit(entry) for entry in stored_files_by_ccat])
-
-            success = True
-        except Exception as e:
-            log.error(f"Error embedding all stored files: {e}")
-
-        await self.plugin_manager.execute_hook(
-            "after_all_cheshire_cats_embedded", success, caller=self,
-        )
-
     def is_custom_endpoint(self, path: str, methods: List[str] | None = None):
         """
         Check if the given path and methods correspond to a custom endpoint.
