@@ -1,25 +1,46 @@
 """Multimodal Ingestion — owns the image lifecycle of the Cat.
 
 This plugin centralizes every image concern that MyCAT historically kept in the
-core ``RabbitHole`` and ``StrayCat``:
+core ``RabbitHole``, ``StrayCat`` and ``routes/file_manager``:
 
 - ingestion: extracts the images produced by multimodal parsers before chunking
   (``rabbithole_collects_document_images``) and builds the stored image points
   (``rabbithole_stores_image_points``) — embed via ``embed_images``, save as
   files via ``save_file``, points with ``image=True`` / ``image_file`` metadata.
+- deletion: cascade-removes the extracted-image files when a source file is
+  deleted (``before_file_manager_file_delete``), before its memory points go.
 - recall: attaches the recalled multimodal images to the agentic workflow task
   (``before_agentic_workflow``) as full ``image_url`` content parts, so a
   vision-capable LLM can see them.
 
 With this plugin disabled the core returns to upstream parity: no image
-collection, no image points, no image recall.
+collection, no image points, no image-file cascade, no image recall.
 """
 
+import os
 
 from cat import hook
 from cat.core_plugins.multimodal_ingestion import ingestion, recall
 from cat.looking_glass.models import AgenticWorkflowTask
-from cat.services.memory.models import PointStruct
+from cat.services.memory.models import PointStruct, VectorMemoryType
+
+
+@hook(priority=0)
+async def before_file_manager_file_delete(filename: str, scope: str, cat) -> None:
+    """Cascade-remove the extracted-image files of a deleted source.
+
+    Fired by the DELETE /file_manager single-file route right after the source
+    file is removed from storage and BEFORE its memory points are deleted (the
+    point metadata still records the image file names). Derives the collection
+    (declarative/episodic) and the storage path from the deletion scope
+    ("agent" or a chat id), then removes the image files of the source.
+    """
+    chat_id = None if scope == "agent" else scope
+    collection_id = str(VectorMemoryType.DECLARATIVE if chat_id is None else VectorMemoryType.EPISODIC)
+    path = cat.agent_key
+    if chat_id:
+        path = os.path.join(path, chat_id)
+    await ingestion.delete_source_image_files(cat, collection_id, path, filename)
 
 
 @hook(priority=0)

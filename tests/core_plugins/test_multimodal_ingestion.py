@@ -377,6 +377,70 @@ async def test_stores_image_points_hook_returns_built_points(cheshire_cat, monke
     assert points[0].payload["metadata"]["image"] is True
 
 
+# ---------- deletion (used to be RabbitHole/_delete_source_image_files in the core) ----------
+
+
+def _image_point(payload_metadata: dict):
+    import types
+
+    return types.SimpleNamespace(payload={"metadata": payload_metadata})
+
+
+async def test_before_file_manager_file_delete_agent_scope(cheshire_cat, monkeypatch):
+    """The plugin hook cascade-removes the image files of a deleted source.
+
+    Agent scope: declarative collection, storage path = agent_key.
+    """
+    removed_files = []
+    queries = []
+
+    class FakeHandler:
+        async def get_all_tenant_points(self, collection_name, limit, offset, metadata):
+            queries.append((collection_name, limit, offset, metadata))
+            points = [
+                _image_point({"source": "test.txt", "image": True, "image_file": "test_img_0_abcd.jpg"}),
+                _image_point({"source": "test.txt"}),  # no image_file -> no removal
+            ]
+            return points, None
+
+    class FakeFileManager:
+        def remove_file(self, file_path):
+            removed_files.append(file_path)
+            return True
+
+    monkeypatch.setattr(cheshire_cat, "vector_memory_handler", FakeHandler())
+    monkeypatch.setattr(cheshire_cat, "file_manager", FakeFileManager())
+
+    await multimodal_plugin.before_file_manager_file_delete.function("test.txt", "agent", cheshire_cat)
+
+    assert queries == [("declarative", 100, None, {"source": "test.txt", "image": True})]
+    assert removed_files == ["agent_test/test_img_0_abcd.jpg"]
+
+
+async def test_before_file_manager_file_delete_chat_scope(cheshire_cat, monkeypatch):
+    """Chat scope: episodic collection, storage path = agent_key/chat_id."""
+    removed_files = []
+    queries = []
+
+    class FakeHandler:
+        async def get_all_tenant_points(self, collection_name, limit, offset, metadata):
+            queries.append((collection_name, limit, offset, metadata))
+            return [_image_point({"source": "doc.pdf", "image": True, "image_file": "doc_img_0.png"})], None
+
+    class FakeFileManager:
+        def remove_file(self, file_path):
+            removed_files.append(file_path)
+            return True
+
+    monkeypatch.setattr(cheshire_cat, "vector_memory_handler", FakeHandler())
+    monkeypatch.setattr(cheshire_cat, "file_manager", FakeFileManager())
+
+    await multimodal_plugin.before_file_manager_file_delete.function("doc.pdf", "chat_abc", cheshire_cat)
+
+    assert queries == [("episodic", 100, None, {"source": "doc.pdf", "image": True})]
+    assert removed_files == ["agent_test/chat_abc/doc_img_0.png"]
+
+
 # ---------- recall (used to be StrayCat._attach_recalled_images) ----------
 
 # A real 1x1 PNG so base64 decode and Pillow ``Image.open`` both work.
