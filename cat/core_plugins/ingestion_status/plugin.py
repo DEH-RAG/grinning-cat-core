@@ -12,6 +12,7 @@ import asyncio
 from cat import hook
 from cat.core_plugins.ingestion_status.registry import (
     IngestionStatus,
+    delete_status,
     get_status,
     set_status,
 )
@@ -32,6 +33,24 @@ def _source_type(source: str, is_url: bool = False) -> str:
     if is_url or source.startswith("http"):
         return "url"
     return "file"
+
+
+_heartbeat_tasks: dict = {}
+
+
+def _heartbeat_key(agent_id: str, scope: str, source: str) -> str:
+    return f"{agent_id}:{scope}:{source}"
+
+
+async def _cancel_heartbeat(agent_id: str, scope: str, source: str) -> None:
+    task = _heartbeat_tasks.pop(_heartbeat_key(agent_id, scope, source), None)
+    if task is None:
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 async def _heartbeat_status(agent_id: str, scope: str, source: str, interval: float) -> None:
@@ -150,3 +169,41 @@ async def rabbithole_ingestion_error(source, error, cat) -> None:
         chat_id=chat_id,
         error=str(error),
     )
+
+@hook(priority=0)
+def rabbithole_processing_heartbeat_start(source: str, scope: str, interval: float, cat) -> None:
+    """Spawn the heartbeat task that keeps the PROCESSING row fresh."""
+    if cat is None:
+        return
+    agent_id = getattr(cat, "agent_key", None)
+    if not agent_id:
+        return
+    key = _heartbeat_key(agent_id, scope, source)
+    # safety: stop any pre-existing heartbeat for the same row
+    if key in _heartbeat_tasks:
+        _heartbeat_tasks[key].cancel()
+    _heartbeat_tasks[key] = asyncio.ensure_future(
+        _heartbeat_status(agent_id, scope, source, interval)
+    )
+
+
+@hook(priority=0)
+async def rabbithole_processing_heartbeat_stop(source: str, scope: str, cat) -> None:
+    """Cancel the heartbeat task spawned on processing start."""
+    if cat is None:
+        return
+    agent_id = getattr(cat, "agent_key", None)
+    if not agent_id:
+        return
+    await _cancel_heartbeat(agent_id, scope, source)
+
+
+@hook(priority=0)
+async def after_file_manager_file_deleted(filename: str, scope: str, cat) -> None:
+    """Drop the per-source status row when the file is deleted."""
+    if cat is None:
+        return
+    agent_id = getattr(cat, "agent_key", None)
+    if not agent_id:
+        return
+    await delete_status(agent_id, scope, filename)

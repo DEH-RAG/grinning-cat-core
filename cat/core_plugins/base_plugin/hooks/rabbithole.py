@@ -196,3 +196,24 @@ def rabbithole_ingestion_processing(source, cat) -> None:
             Cheshire Cat or Stray Cat instance.
     """
     pass
+
+
+@hook(priority=0)
+def rabbithole_processing_heartbeat_start(source: str, scope: str, interval: float, cat) -> None:
+    """Hook to start a background heartbeat for a PROCESSING ingestion row.
+
+    Fired by RabbitHole when a source starts being processed; the
+    ``ingestion_status`` plugin uses it to spawn the task that keeps the row
+    fresh during long parses. No-op default.
+    """
+    pass
+
+
+@hook(priority=0)
+def rabbithole_processing_heartbeat_stop(source: str, scope: str, cat) -> None:
+    """Hook to stop the heartbeat started by ``..._heartbeat_start``.
+
+    Fired by RabbitHole when the processing ends (success or error); the
+    ``ingestion_status`` plugin cancels its heartbeat task here. No-op default.
+    """
+    pass
