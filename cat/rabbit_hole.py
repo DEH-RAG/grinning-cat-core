@@ -1,5 +1,4 @@
 import asyncio
-import base64
 import hashlib
 import json
 import mimetypes
@@ -19,7 +18,6 @@ from cat.log import log
 from cat.services.factory.chunker import BaseChunker
 from cat.services.ingestion_executor import run_in_ingestion_executor
 from cat.services.memory.models import VectorMemoryType, PointStruct
-from cat.services.service_factory import ServiceFactory
 from cat.utils import is_url as fnc_is_url
 
 
@@ -415,80 +413,20 @@ class RabbitHole:
             if isinstance(doc.metadata, dict):
                 doc.metadata.setdefault("source", source)
 
-        # Collect the images extracted by multimodal parsers (if a multimodal embedder is active).
-        # This must happen BEFORE chunking: the chunkers may drop or alter the metadata that carries
-        # the image payload (e.g. PLUS SemanticChunker discards metadata, _merge_short_chunks keeps
-        # only the first chunk's metadata).
-        images = self._collect_document_images(super_docs) if await self._is_multimodal_embedder() else []
-
-        # The image payload was consumed above to embed and save the images as files:
-        # strip it from the parsed documents so it is neither duplicated into every
-        # text chunk's metadata nor stored in the vector DB (where it would bloat the
-        # payloads and be forwarded to the LLM on recall).
-        if images:
-            for doc in super_docs:
-                doc.metadata.pop("image_base64", None)
+        # Collect the images extracted by multimodal parsers (if a multimodal embedder is
+        # active) BEFORE chunking: the chunkers may drop or alter the metadata that carries
+        # the image payload (e.g. PLUS SemanticChunker discards metadata, _merge_short_chunks
+        # keeps only the first chunk's metadata). The multimodal_ingestion plugin owns the
+        # extraction AND strips the transient image_base64 from the docs; with no plugin the
+        # no-op returns [] (upstream parity: no image handling).
+        images = await self.cat.plugin_manager.execute_hook(
+            "rabbithole_collects_document_images", [], super_docs, caller=self.stray or self.cat,
+        ) or []
 
         # Split
         await self._send_notification_message("Parsing completed. Now let's go with reading process...")
         docs = await self._split_text(docs=super_docs)
         return docs, images
-
-    async def _is_multimodal_embedder(self) -> bool:
-        """Check whether the active embedder supports multimodality.
-
-        This mirrors the detection used by the PLUS rabbit_hole hook: the active embedder
-        instance is resolved to its settings class and `is_multimodal()` tells whether the
-        images extracted by multimodal parsers should be embedded and stored in memory.
-
-        The embedder factory must be resolved with the LIZARD's plugin manager (system
-        context): the `factory_allowed_embedders` hooks are declared with a `lizard`
-        parameter (core `base_plugin` and PLUS alike), and `MadHatter.context_execute_hook`
-        passes the caller under the keyword `lizard` only when the executing manager belongs
-        to BillTheLizard. Using an agent plugin manager would pass `cat` instead and make
-        those hooks raise `TypeError: unexpected keyword argument 'cat'`.
-        """
-        if not self.cat:
-            return False
-
-        lizard = self.cat.lizard
-        sp = ServiceFactory(
-            agent_key=lizard.agent_key,
-            hook_manager=lizard.plugin_manager,
-            factory_allowed_handler_name="factory_allowed_embedders",
-            setting_category="embedder",
-            schema_name="languageEmbedderName",
-        )
-        embedder_config = await sp.get_config_class_from_adapter(
-            await lizard.embedder()
-        )
-        return bool(embedder_config) and embedder_config.is_multimodal()
-
-    def _collect_document_images(self, docs: List[Document]) -> List[Dict]:
-        """Collect the images extracted by multimodal parsers from the parsed documents.
-
-        Multimodal parsers (e.g. the PLUS `UnstructuredParser` configured with
-        `extract_image_block_to_payload=True`) attach each extracted image to the parsed
-        `Document` metadata as a base64-encoded payload in `image_base64`, with the mime
-        type in `image_mime_type`. This helper walks the parsed documents and returns one
-        entry per image, carrying the raw bytes ready to be embedded and the base64 payload
-        to be stored in the vector memory metadata.
-
-        Returns:
-            List[Dict]: A list of dicts with keys ``image_base64``, ``image_bytes`` and
-            ``image_mime_type`` (defaulting to ``image/jpeg``).
-        """
-        images: List[Dict] = []
-        for doc in docs:
-            image_base64 = doc.metadata.get("image_base64")
-            if not image_base64:
-                continue
-            images.append({
-                "image_base64": image_base64,
-                "image_bytes": base64.b64decode(image_base64),
-                "image_mime_type": doc.metadata.get("image_mime_type", "image/jpeg"),
-            })
-        return images
 
     async def store_documents(
         self,
@@ -575,70 +513,23 @@ class RabbitHole:
             vector=vector,
         ) for doc, vector in zip(valid_documents, storing_vectors)]
 
-        # If a multimodal embedder is active and the multimodal parsers extracted some images,
-        # embed them and add them to the same collection as the text chunks.
-        if images and await self._is_multimodal_embedder():
+        # If the multimodal_ingestion plugin collected images for this source, let it
+        # build the image points (embed_images + save_file + PointStruct metadata): the
+        # core only appends them to the same collection. With no plugin the no-op returns
+        # [] (upstream parity: no image points).
+        if images:
             chat_id = self.stray.id if self.stray else None
-            is_image_source = (mimetypes.guess_type(source)[0] or "").startswith("image/")
-
-            if is_image_source:
-                # Uploaded image files: the parser (hi_res) can split the file into
-                # sub-crops. Embed the source file itself as a single whole-image
-                # point (image_file = the source, no derived file) and ignore crops.
-                whole_image = source_bytes if source_bytes is not None else (images[0]["image_bytes"] if images else None)
-                embeds = await run_in_ingestion_executor(lambda: embedder.embed_images([whole_image])) if whole_image is not None else []
-                files_and_vectors = [(source, embeds[0])] if embeds and embeds[0] is not None else []
-            else:
-                image_vectors = await run_in_ingestion_executor(
-                    lambda: embedder.embed_images([img["image_bytes"] for img in images])
-                )
-                files_and_vectors = []
-                for idx, (img, vector) in enumerate(zip(images, image_vectors)):
-                    if vector is None:
-                        # A failed/skipped image embed (None placeholder) is dropped
-                        # entirely: neither saved as a file nor stored as a point.
-                        continue
-                    image_file = self._image_file_name(source, idx, img["image_mime_type"], img["image_bytes"])
-                    await self.cat.save_file(img["image_bytes"], img["image_mime_type"], image_file, chat_id)
-                    files_and_vectors.append((image_file, vector))
-
-            image_points = [
-                PointStruct(
-                    id=uuid.uuid4().hex,
-                    vector=vector,
-                    payload={
-                        "page_content": f"[Image] {source}",
-                        "metadata": {
-                            **(metadata or {}),
-                            "source": source,
-                            "when": time.time(),
-                            "hash": file_hash,
-                            "image": True,
-                            "image_file": image_file,
-                            **({"chat_id": self.stray.id} if self.stray else {}),
-                        },
-                    },
-                )
-                for image_file, vector in files_and_vectors
-            ]
-            points.extend(image_points)
+            image_points = await plugin_manager.execute_hook(
+                "rabbithole_stores_image_points",
+                [], images, source, source_bytes, metadata, file_hash, chat_id,
+                caller=self.cat,
+            )
+            points.extend(image_points or [])
 
         collection_name = str(VectorMemoryType.DECLARATIVE if not self.stray else VectorMemoryType.EPISODIC)
         await self.cat.vector_memory_handler.add_points_to_tenant(collection_name=collection_name, points=points)
 
         return points
-
-    def _image_file_name(self, source: str, index: int, mime_type: str, image_bytes: bytes) -> str:
-        """Deterministic, unique file name for an extracted image.
-
-        The stem comes from the source file name so the association between an
-        image and the document it was extracted from is recoverable by name.
-        """
-        stem = os.path.splitext(os.path.basename(source))[0]
-        stem = re.sub(r"[^a-zA-Z0-9._-]", "_", stem).strip("._") or "image"
-        ext = mimetypes.guess_extension(mime_type or "") or ".png"
-        digest = hashlib.sha256(image_bytes).hexdigest()[:8]
-        return f"{stem}_img_{index}_{digest}{ext}"
 
     async def _split_text(self, docs: List[Document]):
         """Split LangChain documents in chunks.
