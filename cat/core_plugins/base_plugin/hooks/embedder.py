@@ -10,7 +10,7 @@ def after_embedder_settings_update(embedder_name: str, embedder_size: int, lizar
 
     This function is executed after the configured embedder changed (the PUT
     /embedder/settings route then notifies the plugins instead of re-embedding
-    directly). The ``ingestion_status`` core plugin implements this hook to run
+    directly). The ``efficient_ingestion`` core plugin implements this hook to run
     the re-embed of stored sources and procedures; without it the hook is a
     no-op and nothing is re-embedded.
 

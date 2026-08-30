@@ -10,7 +10,7 @@ from cat.services.service_factory import ServiceFactory
 async def _reembed_on_embedder_change(lizard, embedder_name: str, embedder_size: int) -> None:
     """Notify plugins that the embedder changed (re-embed trigger).
 
-    The actual re-embed engine lives in the ``ingestion_status`` core plugin
+    The actual re-embed engine lives in the ``efficient_ingestion`` core plugin
     (``after_embedder_settings_update`` hook); the core only fires the hook so
     the fork stays close to upstream (no re-embed logic here).
     """
@@ -79,7 +79,7 @@ async def upsert_embedder_setting(
     current_embedder = await lizard.embedder()
 
     # a characterizing feature of the embedder has been updated: inform the plugins,
-    # which own the re-embed engine (ingestion_status core plugin hook)
+    # which own the re-embed engine (efficient_ingestion core plugin hook)
     if previous_embedder != current_embedder:
         run_background_task(
             background_tasks,

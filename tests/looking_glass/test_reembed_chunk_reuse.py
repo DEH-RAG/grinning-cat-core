@@ -1,4 +1,4 @@
-"""Tests for the chunk-reuse re-embed path in ``ingestion_status.reembed.reembed_sources``.
+"""Tests for the chunk-reuse re-embed path in ``efficient_ingestion.reembed.reembed_sources``.
 
 The embedder-change re-embed (``embed_all_in_cheshire_cats``) used to re-parse every
 source from disk/URL via ``rabbit_hole.ingest_file``. This suite pins the new
@@ -12,7 +12,7 @@ import os
 from langchain_core.documents import Document
 
 from cat.db import crud
-from cat.core_plugins.ingestion_status.reembed import reembed_sources
+from cat.core_plugins.efficient_ingestion.reembed import reembed_sources
 from cat.looking_glass.models import StoredSourceWithMetadata
 from cat.rabbit_hole import RabbitHole
 from cat.services.memory.models import Record, VectorMemoryType

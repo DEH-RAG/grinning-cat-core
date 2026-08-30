@@ -1,8 +1,8 @@
-"""Re-embed engine for embedder changes (owned by the ingestion_status plugin).
+"""Re-embed engine for embedder changes (owned by the efficient_ingestion plugin).
 
 This module hosts the re-embed logic that used to live in the core
 (``CheshireCat.embed_stored_sources`` + ``BillTheLizard.embed_all_in_cheshire_cats``):
-when the configured embedder changes, the stored sources of every agent are
+when the configured embedder changes, on embedder changes, the stored sources of every agent are re-embedded
 re-embedded reusing the already-stored chunks (chunk-reuse) or, when no chunk
 is reusable (e.g. the collection was just recreated), by re-ingesting the
 source file/URL. Image points are re-embedded via ``embed_images`` only for
@@ -17,6 +17,9 @@ import uuid
 
 from langchain_core.documents import Document
 
+from cat.core_plugins.efficient_ingestion.settings import (
+    get_settings as get_plugin_settings,
+)
 from cat.core_plugins.ingestion_status.registry import (
     IngestionStatus,
     set_status,
@@ -282,6 +285,9 @@ async def reembed_all(lizard, embedder_name: str, embedder_size: int) -> bool:
     """
     success = False
     try:
+        plugin_settings = await get_plugin_settings()
+        max_concurrency = max(1, int(plugin_settings.get("reembed_max_concurrency", 5)))
+
         ccat_ids = await crud_settings.get_agents_main_keys()
         stored_files_by_ccat = []
         # first, get all the stored files from all the Cheshire Cats with the
@@ -301,8 +307,9 @@ async def reembed_all(lizard, embedder_name: str, embedder_size: int) -> bool:
             await entry["ccat"].vector_memory_handler.initialize(embedder_name, embedder_size)
 
         # then re-embed every stored file/procedure, limiting concurrent
-        # embeddings to avoid overwhelming resources
-        semaphore = asyncio.Semaphore(5)  # Max 5 concurrent
+        # embeddings to avoid overwhelming resources (tunable via the plugin
+        # settings, category 're-ingestion')
+        semaphore = asyncio.Semaphore(max_concurrency)
 
         async def embed_with_limit(entry_):
             async with semaphore:
