@@ -849,3 +849,89 @@ async def test_multimodal_embed_images_truncation_is_detected(cheshire_cat, monk
     assert fake.deleted == []
     assert len(fake.scroll()) == len(original)
     assert {p.id for p in fake.scroll()} == {p.id for p in original}
+
+# ---------- phase machine: embedder/chunker-aware decision ----------
+
+
+async def test_completed_matching_embedder_skips_source(cheshire_cat, monkeypatch):
+    """A completed row whose embedder AND chunker match the current ones is skipped
+    (no re-embed, no ingest)."""
+    from cat.core_plugins.ingestion_status.registry import IngestionStatus, set_status
+    from cat.utils import get_nlp_object_name
+
+    fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+    # current names recorded at phase start would be "FakeEmbedder"/<active chunker>
+    embedder_name = "FakeEmbedder"
+    chunker = getattr(cheshire_cat, "chunker", None)
+    chunker_name = (
+        str(chunker.name) if chunker is not None and getattr(chunker, "name", None) else
+        get_nlp_object_name(chunker, "default_chunker")
+    )
+    await set_status(
+        agent_id, "agent", "test.txt",
+        type_="file", status=IngestionStatus.COMPLETED,
+        embedder_name=embedder_name, chunker_name=chunker_name,
+    )
+
+    writes = []
+    async def fake_store(key, value, path=None, nx=False, xx=False, expire=None):
+        writes.append((key, value))
+        return value
+    monkeypatch.setattr(crud, "store", fake_store)
+
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+
+    # no add points (skipped) — but the claim may rewrite the row; assert no re-embed
+    assert fake.added == []
+    # the row is NOT re-written to processing (it stays completed)
+    statuses = [v["status"] for k, v in writes if k == _status_key("test.txt")]
+    assert statuses == []
+
+
+async def test_completed_embedder_mismatch_reembeds(cheshire_cat, monkeypatch):
+    """A completed row whose embedder differs from the current one is re-embedded
+    (embedding phase, chunk-reuse)."""
+    from cat.core_plugins.ingestion_status.registry import IngestionStatus, set_status
+    from cat.utils import get_nlp_object_name
+
+    fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+    chunker = getattr(cheshire_cat, "chunker", None)
+    chunker_name = (
+        str(chunker.name) if chunker is not None and getattr(chunker, "name", None) else
+        get_nlp_object_name(chunker, "default_chunker")
+    )
+    # old embedder mismatch -> re-embed
+    await set_status(
+        agent_id, "agent", "test.txt",
+        type_="file", status=IngestionStatus.COMPLETED,
+        embedder_name="VeryOldEmbedder", chunker_name=chunker_name,
+    )
+
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+
+    # chunk-reuse happened: exactly one add, ingest_file not called
+    assert len(fake.added) == 1
+    assert fake.deleted == [(str(VectorMemoryType.DECLARATIVE), {"source": "test.txt"})]
+
+
+async def test_completed_chunker_mismatch_full_reingest(cheshire_cat, monkeypatch):
+    """A completed row whose chunker differs from the current one is fully re-ingested
+    (parsing_chunking phase), NOT chunk-reused."""
+    from cat.core_plugins.ingestion_status.registry import IngestionStatus, set_status
+
+    fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
+    ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+    # chunker mismatch (points exist but chunker changed) -> full re-ingest
+    await set_status(
+        agent_id, "agent", "test.txt",
+        type_="file", status=IngestionStatus.COMPLETED,
+        embedder_name="FakeEmbedder", chunker_name="OldChunker",
+    )
+
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+
+    # full re-ingest, not chunk-reuse
+    assert ingest_calls == ["test.txt"]
+    assert fake.added == []
