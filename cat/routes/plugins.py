@@ -200,60 +200,12 @@ async def install_plugin_from_registry(
     return InstallPluginFromRegistryResponse(url=payload["url"], info="Plugin is being installed asynchronously")
 
 
-@router.get("/system/settings", response_model=PluginsSettingsResponse)
-async def get_lizard_plugins_settings(
-    info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.READ),
-) -> PluginsSettingsResponse:
-    """Returns the default settings of all the plugins"""
-    lizard = info.lizard
-    return await get_plugins_settings(lizard.plugin_manager, lizard.agent_key)   # type: ignore[arg-type]
-
-
-@router.get("/system/settings/{plugin_id}", response_model=GetSettingResponse)
-async def get_lizard_plugin_settings(
-    plugin_id: str,
-    info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.READ),
-) -> GetSettingResponse:
-    """Returns the default settings of a specific plugin"""
-    lizard = info.lizard
-    plugin_manager = lizard.plugin_manager
-    if not plugin_manager.plugin_exists(plugin_id):
-        raise CustomNotFoundException("Plugin not found")
-
-    return await get_plugin_settings(plugin_manager, plugin_id, lizard.agent_key)   # type: ignore[arg-type]
-
-
-@router.put("/system/settings/{plugin_id}", response_model=GetSettingResponse)
-async def upsert_lizard_plugin_settings(
-    plugin_id: str,
-    payload: Dict = Body({"setting_a": "some value", "setting_b": "another value"}),
-    info: AuthorizedInfo = check_permissions(AuthResource.SYSTEM, AuthPermission.WRITE),
-) -> GetSettingResponse:
-    """Updates the settings of a specific plugin, at a system level (same pattern as the embedder settings upsert)"""
-    plugin_id = slugify(plugin_id, separator="_")
-
-    # access cat instance
-    lizard = info.lizard
-    plugin_manager = lizard.plugin_manager
-    if not plugin_manager.plugin_exists(plugin_id):
-        raise CustomNotFoundException("Plugin not found")
-
-    # Get the plugin object
-    plugin = plugin_manager.plugins[plugin_id]
-    try:
-        # Load the plugin settings Pydantic model, and validate the settings
-        plugin.settings_model().model_validate(payload)
-    except ValidationError as e:
-        raise CustomValidationException("\n".join(list(map(lambda x: x["msg"], e.errors()))))
-
-    final_settings = await plugin.save_settings(payload, lizard.agent_key)  # type: ignore[union-attr]
-    # NOTE: no `after_plugin_settings_update` hook here on purpose. That hook is
-    # agent-scoped (firma `(plugin_id, settings, cat)`); at system level the
-    # caller context is `lizard`, which breaks third-party hooks (e.g.
-    # cc_scrapycat) that do not accept it. System-level config changes
-    # (mgmt_message etc.) do not need per-agent notification.
-
-    return GetSettingResponse(name=plugin_id, value=final_settings)
+# NOTE: the former core system-level plugin settings routes
+# (GET /plugins/system/settings, GET/PUT /plugins/system/settings/{plugin_id})
+# have been moved into the mgmt_message plugin itself
+# (see cat/core_plugins/mgmt_message/endpoints.py: GET/PUT /mgmt_message/settings
+# and the public GET /mgmt_message/global_message). Same storage (system:agent
+# settings list via cat.db.crud), same permissions (SYSTEM READ/WRITE).
 
 
 @router.get("/system/details/{plugin_id}", response_model=GetPluginDetailsResponse)

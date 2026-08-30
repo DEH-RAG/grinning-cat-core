@@ -1,10 +1,10 @@
-from datetime import UTC, datetime
-from uuid import uuid4
-
 from pydantic import BaseModel
 
 from cat import log, plugin
-from cat.db.database import DEFAULT_AGENT_KEY, DEFAULT_SYSTEM_KEY, get_sync_db
+from cat.db import crud
+from cat.db.cruds import settings as crud_settings
+from cat.db.database import DEFAULT_SYSTEM_KEY
+from cat.db.models import Setting
 
 # entry name under which this plugin persists its settings in the global
 # ``system:agent`` settings list, exactly like the system-level embedder
@@ -12,7 +12,8 @@ from cat.db.database import DEFAULT_AGENT_KEY, DEFAULT_SYSTEM_KEY, get_sync_db
 _MGMT_SETTING_NAME = "mgmt_message"
 _MGMT_SETTING_CATEGORY = "mgmt_message"
 
-# legacy key written by the previous default-plugin-settings mechanism
+# key written by the previous default-plugin-settings mechanism (and by the
+# core activate_settings), which this plugin replaces with system:agent storage
 _LEGACY_KEY = f"{DEFAULT_SYSTEM_KEY}:plugins:{_MGMT_SETTING_NAME}"
 
 
@@ -33,101 +34,91 @@ def settings_model():
     return PluginSettings
 
 
-def _system_agent_key() -> str:
-    return f"{DEFAULT_SYSTEM_KEY}:{DEFAULT_AGENT_KEY}"
+async def _read_legacy() -> dict | None:
+    """Read the legacy key via the official crud API (read may wrap in a list)."""
+    try:
+        raw = await crud.read(_LEGACY_KEY)
+    except Exception as e:  # noqa: BLE001 - cleanup/migration must never break settings I/O
+        log.error(f"mgmt_message legacy key read failed: {e}")
+        return None
+
+    # ``crud.read`` returns the document wrapped in a list; normalize to the dict
+    if isinstance(raw, list):
+        raw = raw[0] if raw else None
+    return raw if isinstance(raw, dict) else None
 
 
-def _upsert_entry(db, validated: dict) -> None:
-    """Upsert the plugin entry in the ``system:agent`` settings list.
+async def _drop_legacy_key() -> bool:
+    """Best-effort removal of the leftover ``system:plugins:mgmt_message`` key.
 
-    Mirrors ``crud_settings.upsert_setting_by_category`` (same storage, same
-    ``category`` semantics) so the plugin's system:agent entry is byte-identical
-    in shape to the one the embedder configuration produces.
+    The core writes that key at plugin activation (``activate_settings``); this
+    plugin's single source of truth is the ``system:agent`` settings list, so
+    the leftover is dropped whenever the settings are read or written.
     """
-    key = _system_agent_key()
+    if await _read_legacy() is None:
+        return False
 
-    full = db.json().get(key, "$")
-    settings_list: list = []
-    if isinstance(full, list) and full and isinstance(full[0], list):
-        settings_list = full[0]
+    try:
+        await crud.delete(_LEGACY_KEY)
+    except Exception as e:  # noqa: BLE001
+        log.error(f"mgmt_message legacy key delete failed: {e}")
+    return True
 
-    new_entry = {
-        "name": _MGMT_SETTING_NAME,
-        "value": validated,
-        "category": _MGMT_SETTING_CATEGORY,
-        "setting_id": str(uuid4()),
-        "updated_at": datetime.now(UTC).timestamp(),
-    }
 
-    replaced = False
-    for i, entry in enumerate(settings_list):
-        if entry.get("name") == _MGMT_SETTING_NAME:
-            settings_list[i] = new_entry
-            replaced = True
-            break
-    if not replaced:
-        settings_list.append(new_entry)
+async def _migrate_legacy() -> dict | None:
+    """One-off migration: move the old ``system:plugins:mgmt_message`` dict
+    into the ``system:agent`` settings list, via the official crud API."""
+    legacy = await _read_legacy()
+    if legacy is None:
+        return None
 
-    db.json().set(key, "$", settings_list)
+    try:
+        validated = PluginSettings(**legacy).model_dump()
+        await crud_settings.upsert_setting_by_name(
+            DEFAULT_SYSTEM_KEY,
+            Setting(name=_MGMT_SETTING_NAME, value=validated, category=_MGMT_SETTING_CATEGORY),
+        )
+        await crud.delete(_LEGACY_KEY)
+        return validated
+    except Exception as e:  # noqa: BLE001 - migration must never block the settings load
+        log.error(f"mgmt_message legacy migration failed: {e}")
+        return None
 
 
 @plugin
-def load_settings(plugin_id: str, agent_id: str) -> dict:
+async def load_settings(plugin_id: str, agent_id: str) -> dict:
     """Read the plugin settings from the global ``system:agent`` settings list.
 
-    NOTE: the Plugin base invokes the ``load_settings`` override synchronously,
-    so this must stay a plain function (no async / no crud_settings).
+    Async override using the official ``cat.db.crud`` API (the Plugin base now
+    awaits async ``load_settings`` overrides); the per-agent ``agent_id`` is
+    ignored on purpose: these settings are global for the whole instance.
     """
-    db = get_sync_db()
-    found = db.json().get(_system_agent_key(), f'$[?(@.name=="{_MGMT_SETTING_NAME}")]')
-    if found and isinstance(found[0], dict):
-        value = found[0].get("value")
-        if isinstance(value, dict):
-            return value
+    setting = await crud_settings.get_setting_by_name(DEFAULT_SYSTEM_KEY, _MGMT_SETTING_NAME)
+    value = (setting or {}).get("value")
+    if isinstance(value, dict):
+        # self-heal the activation leftover while we are here
+        await _drop_legacy_key()
+        return value
 
     # not stored: one-off migration of the legacy key, otherwise model defaults
-    migrated = _migrate_legacy(db)
+    migrated = await _migrate_legacy()
     if migrated is not None:
         return migrated
     return PluginSettings().model_dump()
 
 
 @plugin
-def save_settings(plugin_id: str, settings: dict, agent_id: str) -> dict:
+async def save_settings(plugin_id: str, settings: dict, agent_id: str) -> dict:
     """Upsert the plugin settings into the global ``system:agent`` list.
 
-    Sync override (the Plugin base calls it without await).
+    Async override persisting with the official ``cat.db.crud`` API (same
+    storage and the same category semantics as the system-level embedder).
     """
     validated = PluginSettings(**settings).model_dump()
-    db = get_sync_db()
-    _upsert_entry(db, validated)
-    # no longer used: drop the legacy key if it still exists
-    if db.exists(_LEGACY_KEY):
-        db.delete(_LEGACY_KEY)
+    await crud_settings.upsert_setting_by_name(
+        DEFAULT_SYSTEM_KEY,
+        Setting(name=_MGMT_SETTING_NAME, value=validated, category=_MGMT_SETTING_CATEGORY),
+    )
+    # no longer used: drop the leftover key if it still exists
+    await _drop_legacy_key()
     return validated
-
-
-@plugin
-def activated(plugin):
-    # Plugin.activate_settings() writes a system:plugins:<id> key on every
-    # activation; this plugin persists in system:agent (like the embedder
-    # config), so drop that leftover key to keep a single source of truth.
-    db = get_sync_db()
-    if db.exists(_LEGACY_KEY):
-        db.delete(_LEGACY_KEY)
-
-
-def _migrate_legacy(db) -> dict | None:
-    """One-off migration: move the old ``system:plugins:mgmt_message`` dict into ``system:agent``."""
-    legacy = db.json().get(_LEGACY_KEY)
-    if not isinstance(legacy, dict) or not legacy:
-        return None
-
-    try:
-        validated = PluginSettings(**legacy).model_dump()
-        _upsert_entry(db, validated)
-        db.delete(_LEGACY_KEY)
-        return validated
-    except Exception as e:  # noqa: BLE001 - migration must never block the settings load
-        log.error(f"mgmt_message legacy migration failed: {e}")
-        return None
