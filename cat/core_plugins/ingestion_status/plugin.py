@@ -6,11 +6,17 @@ into Redis via the plugin's registry module.
 Lifecycle written by these hooks:
     files:  uploaded -> processing -> completed | error
     urls:   uploaded -> downloading -> downloaded -> processing -> completed | error
+
+Phase diary (``doc["phase"]``), set at the START of each phase so a crash
+leaves the in-flight phase and the resume re-runs exactly that phase:
+    downloading -> parsing_chunking -> embedding -> (completed clears phase)
 """
 import asyncio
 
 from cat import hook
 from cat.core_plugins.ingestion_status.registry import (
+    PHASE_DOWNLOADING,
+    PHASE_PARSING_CHUNKING,
     IngestionStatus,
     clear_agent,
     delete_status,
@@ -34,6 +40,22 @@ def _source_type(source: str, is_url: bool = False) -> str:
     if is_url or source.startswith("http"):
         return "url"
     return "file"
+
+
+def _chunker_name(cat) -> str | None:
+    """Best-effort name of the active chunker, read from the caller.
+
+    The chunker is resolved lazily by the core (``cat.chunker`` on
+    BotMixin); a failure here must never break a status write.
+    """
+    try:
+        chunker = getattr(cat, "chunker", None)
+        if chunker is None:
+            return None
+        name = getattr(chunker, "name", None)
+        return str(name) if name else None
+    except Exception:  # noqa: BLE001 - status writes must never fail
+        return None
 
 
 _heartbeat_tasks: dict = {}
@@ -102,6 +124,7 @@ async def rabbithole_url_downloading(url, filename, cat) -> None:
         type_="url",
         status=IngestionStatus.DOWNLOADING,
         chat_id=chat_id,
+        phase=PHASE_DOWNLOADING,
     )
 
 
@@ -116,12 +139,13 @@ async def rabbithole_url_download_completed(url, filename, cat) -> None:
         type_="url",
         status=IngestionStatus.DOWNLOADED,
         chat_id=chat_id,
+        phase=PHASE_DOWNLOADING,
     )
 
 
 @hook(priority=0)
 async def rabbithole_ingestion_processing(source, cat) -> None:
-    """Record that the source is being embedded and stored."""
+    """Record that the source is being parsed, chunked and embedded."""
     scope, chat_id = _scope_and_chat(cat)
     await set_status(
         cat.agent_key,
@@ -130,6 +154,8 @@ async def rabbithole_ingestion_processing(source, cat) -> None:
         type_=_source_type(source),
         status=IngestionStatus.PROCESSING,
         chat_id=chat_id,
+        phase=PHASE_PARSING_CHUNKING,
+        chunker_name=_chunker_name(cat),
     )
 
 
@@ -139,7 +165,8 @@ async def after_rabbithole_stored_documents(source, stored_points, cat) -> None:
 
     The hook fires in the ``finally`` block of ``ingest_file``, so it also runs
     on the error path: never overwrite an already-recorded ERROR state, and
-    ignore the unresolved empty source.
+    ignore the unresolved empty source. The phase diary is cleared on success:
+    a ``completed`` row proves all phases finished, so no phase is pending.
     """
     if not source:
         return
@@ -154,6 +181,7 @@ async def after_rabbithole_stored_documents(source, stored_points, cat) -> None:
         type_=_source_type(source),
         status=IngestionStatus.COMPLETED,
         chat_id=chat_id,
+        clear_phase=True,
     )
 
 
