@@ -9,6 +9,8 @@ import hashlib
 
 from cat.core_plugins.ingestion_status import plugin as ingestion_plugin
 from cat.core_plugins.ingestion_status.registry import (
+    PHASE_DOWNLOADING,
+    PHASE_PARSING_CHUNKING,
     IngestionStatus,
     clear_agent,
     clear_chat,
@@ -20,7 +22,6 @@ from cat.core_plugins.ingestion_status.registry import (
 )
 from cat.db.database import get_async_db
 from tests.utils import agent_id
-
 
 # ---------- registry ----------
 
@@ -137,6 +138,11 @@ async def test_file_lifecycle():
 
     await ingestion_plugin.rabbithole_ingestion_start.function("doc.pdf", {}, False, cat)
     await ingestion_plugin.rabbithole_ingestion_processing.function("doc.pdf", cat)
+    doc = await get_status(agent_id, "agent", "doc.pdf")
+    # during processing the phase diary points at parsing_chunking
+    assert doc["status"] == "processing"
+    assert doc["phase"] == PHASE_PARSING_CHUNKING
+
     await ingestion_plugin.after_rabbithole_stored_documents.function("doc.pdf", [object()], cat)
 
     doc = await get_status(agent_id, "agent", "doc.pdf")
@@ -145,6 +151,8 @@ async def test_file_lifecycle():
     assert doc["type"] == "file"
     assert doc["scope"] == "agent"
     assert doc["chat_id"] is None
+    # the phase diary is cleared on completion
+    assert "phase" not in doc
 
 
 async def test_url_lifecycle():
@@ -153,6 +161,9 @@ async def test_url_lifecycle():
 
     await ingestion_plugin.rabbithole_ingestion_start.function(url, {}, True, cat)
     await ingestion_plugin.rabbithole_url_downloading.function(url, url, cat)
+    doc = await get_status(agent_id, "agent", url)
+    assert doc["status"] == "downloading"
+    assert doc["phase"] == PHASE_DOWNLOADING
     await ingestion_plugin.rabbithole_url_download_completed.function(url, url, cat)
     await ingestion_plugin.rabbithole_ingestion_processing.function(url, cat)
     await ingestion_plugin.after_rabbithole_stored_documents.function(url, [object()], cat)
@@ -188,6 +199,17 @@ async def test_after_stored_does_not_overwrite_error():
     assert doc is not None
     assert doc["status"] == "error"
     assert doc["error"] == "store failed"
+
+
+async def test_processing_records_chunker_name():
+    cat = FakeCat()
+    cat.chunker = type("C", (), {"name": "RecursiveTextChunker"})()
+
+    await ingestion_plugin.rabbithole_ingestion_processing.function("doc.pdf", cat)
+
+    doc = await get_status(agent_id, "agent", "doc.pdf")
+    assert doc["phase"] == PHASE_PARSING_CHUNKING
+    assert doc["chunker_name"] == "RecursiveTextChunker"
 
 
 async def test_chat_scope_lifecycle():

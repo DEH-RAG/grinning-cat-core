@@ -18,17 +18,23 @@ import uuid
 from langchain_core.documents import Document
 
 from cat.core_plugins.ingestion_status.registry import (
+    PHASE_EMBEDDING,
+    PHASE_PARSING_CHUNKING,
     IngestionStatus,
+    claim_source_for_resume,
+    get_status,
+    set_phase,
     set_status,
 )
 from cat.db.cruds import settings as crud_settings
+from cat.env import get_env_int
 from cat.log import log
 from cat.looking_glass.models import StoredSourceWithMetadata
 from cat.services.factory.embedder import is_multimodal_embedder
 from cat.services.factory.ingestion import BaseIngestionEngine
 from cat.services.ingestion_executor import run_in_ingestion_executor
 from cat.services.memory.models import PointStruct, VectorMemoryType
-from cat.utils import guess_file_type, is_url
+from cat.utils import get_nlp_object_name, guess_file_type, is_url
 
 
 async def _set_status(ccat, source: str, status: IngestionStatus, error: str | None = None, chat_id: str | None = None) -> None:
@@ -48,19 +54,88 @@ async def _set_status(ccat, source: str, status: IngestionStatus, error: str | N
         log.error(f"Agent id: {ccat._id}. Failed to write ingestion status for {source}: {e}")
 
 
+def _claim_stale_after() -> float:
+    """Staleness gate for the per-source claim during the re-embed pass.
+
+    Reuses the resume threshold so a source being actively re-embedded by
+    another worker is not re-claimed. ``<=0`` via env disables the gate.
+    """
+    value = get_env_int("CAT_INGESTION_RESUME_STALE_SECONDS")
+    return float(value) if value and value > 0 else 0.0
+
+
+async def _cleanup_orphan_images(ccat, collection_name, source_name, chat_id) -> None:
+    """Remove image points + saved image files of a source before a full re-ingest.
+
+    A full re-ingest (parsing_chunking) regenerates the chunks AND re-extracts
+    the images from scratch. The image points and their saved ``image_file``
+    from the PREVIOUS (possibly incomplete) parse are therefore stale: delete
+    the points in the target first and the files from the agent storage, so the
+    re-ingest starts clean and no orphan image file lingers on disk.
+    """
+    try:
+        points, _ = await ccat.vector_memory_handler.get_all_tenant_points(
+            str(collection_name), with_vectors=False,
+            metadata={"source": source_name, "image": True},
+        )
+    except Exception:  # noqa: BLE001 - cleanup must never break the pass
+        return
+    image_files = [
+        (p.payload or {}).get("metadata", {}).get("image_file")
+        for p in points
+        if (p.payload or {}).get("metadata", {}).get("image_file")
+    ]
+    if not image_files:
+        return
+    root_dir = ccat.agent_key
+    if chat_id:
+        root_dir = os.path.join(root_dir, str(chat_id))
+    for image_file in image_files:
+        try:
+            ccat.file_manager.remove_file(os.path.join(root_dir, image_file))
+        except Exception:  # noqa: BLE001,S110 - best-effort, cleanup must never break the pass
+            pass
+    await ccat.vector_memory_handler.delete_tenant_points(
+        str(collection_name), metadata={"source": source_name, "image": True}
+    )
+
+
+async def _resolve_callers(ccat, chat_id):
+    """Return the RabbitHole/plugin-manager caller and the embedding cat for a source.
+
+    Agent-scoped sources use the CheshireCat itself (scope ``"agent"``); a
+    chat-scoped source needs its StrayCat for the correct ``scope``/hook caller.
+    Returns ``(cat, scope, chat_id)`` where ``cat`` is what receives the
+    ``after_rabbithole_stored_documents`` hook caller, or ``(None, None, None)``
+    when the chat does not (or no longer) exist.
+    """
+    if not chat_id:
+        return ccat, "agent", None
+    stray_cat = await ccat._find_stray_cat(str(chat_id))
+    if stray_cat is None:
+        return None, str(chat_id), chat_id
+    return stray_cat, str(chat_id), chat_id
+
+
 async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_sources: list[StoredSourceWithMetadata]) -> None:
     """
-    Re-embed stored sources into a vector memory collection (chunk-reuse).
+    Re-embed stored sources into a vector memory collection (phase machine).
 
-    When the embedder changed but the collection still holds the stored chunks
-    (same-size/same-alias re-embed) the existing points are reused: only the
-    vectors are recomputed. When a source has no reusable points (e.g. the
-    collection was just recreated by ``initialize``) the source is re-ingested
-    from its file/URL as a fallback.
+    The re-embed pass is crash-recoverable per source via the ``ingestion_status``
+    doc: for each source it decides the start phase from ``status`` +
+    ``embedder_name``/``chunker_name`` + the current embedder/chunker, claims the
+    per-source work (so two workers never process the SAME source), records the
+    phase, executes it and, on the chunk-reuse path, fires the public
+    ``after_rabbithole_stored_documents`` hook so analytics/webhooks are informed.
 
-    Ported verbatim from ``CheshireCat.embed_stored_sources``: the only changes
-    are ``ccat`` as the parameter instead of ``self`` and the ingestion-status
-    writes going through this plugin's ``registry.set_status``.
+    Phase decision (per source):
+      - ``completed`` + embedder == active + chunker == active  -> skip (nothing to do)
+      - ``completed`` + chunker mismatch                         -> ``parsing_chunking`` (full re-ingest, chunks are stale)
+      - ``completed`` + embedder mismatch (chunks valid)         -> ``embedding`` (chunk-reuse)
+      - in-flight / stale row (``uploaded``/``processing``/``error``/``downloading``/``downloaded``):
+          resumes from the phase recorded in ``doc["phase"]`` (``embedding`` -> chunk-reuse,
+          otherwise ``parsing_chunking``), with a conservative fallback to full re-ingest.
+      - no status doc / old row                                -> ``embedding`` if reusable points exist, else full re-ingest.
     """
     log.info(f"Agent id: {ccat._id}. Embedding stored files to the vector memory")
 
@@ -74,12 +149,97 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
 
     rabbit_hole = ccat.rabbit_hole
     embedder = await ccat.embedder()
+    active_embedder_name = getattr(embedder, "name", None) or get_nlp_object_name(embedder, "default_embedder")
+    chunker = getattr(ccat, "chunker", None)
+    active_chunker_name = (
+        str(chunker.name) if chunker is not None and getattr(chunker, "name", None) else
+        get_nlp_object_name(chunker, "default_chunker")
+    )
+    owner = f"reembed-{os.getpid()}"
     counter = 0
+
     for source in stored_sources:
         source_name = source.name
         chat_id = source.metadata.get("chat_id")
+        cat, scope, chat_id = await _resolve_callers(ccat, chat_id)
+        if cat is None:
+            log.warning(
+                f"Stray cat with id {chat_id} not found. Skipping file {source.path}/{source.name}"
+            )
+            continue
 
-        await _set_status(ccat, source_name, IngestionStatus.PROCESSING, chat_id=chat_id)
+        # ---- decide the start phase from the status doc ----
+        doc = await get_status(ccat.agent_key, scope, source_name)
+        doc_status = (doc or {}).get("status")
+        doc_embedder = (doc or {}).get("embedder_name")
+        doc_chunker = (doc or {}).get("chunker_name")
+        doc_phase = (doc or {}).get("phase")
+
+        if (
+            doc_status == IngestionStatus.COMPLETED.value
+            and doc_embedder == active_embedder_name
+            and doc_chunker == active_chunker_name
+        ):
+            # already up to date for the current embedder AND chunker
+            continue
+
+        if doc_status == IngestionStatus.COMPLETED.value:
+            if doc_chunker != active_chunker_name:
+                start_phase = PHASE_PARSING_CHUNKING
+            else:
+                start_phase = PHASE_EMBEDDING
+        elif doc_status in (
+            IngestionStatus.UPLOADED.value,
+            IngestionStatus.PROCESSING.value,
+            IngestionStatus.ERROR.value,
+            IngestionStatus.DOWNLOADING.value,
+            IngestionStatus.DOWNLOADED.value,
+        ):
+            # in-flight / stale: resume from the recorded phase (conservative)
+            start_phase = doc_phase if doc_phase in (PHASE_EMBEDDING, PHASE_PARSING_CHUNKING) else PHASE_PARSING_CHUNKING
+        else:
+            # no doc or unknown: embedding if reusable points exist, else full re-ingest
+            has_points = any(
+                (p.payload or {}).get("metadata", {}).get("source") == source_name
+                for p in existing_points
+            )
+            start_phase = PHASE_EMBEDDING if has_points else PHASE_PARSING_CHUNKING
+
+        # ---- claim the per-source work (skip if another worker holds it) ----
+        # Only rows with an existing status doc need (and support) a claim: a
+        # missing doc means no worker has registered this source yet, so there
+        # is nothing to double-process and no lock to contend on.
+        if doc is not None:
+            claimed = await claim_source_for_resume(
+                ccat.agent_key,
+                scope,
+                source_name,
+                stale_after=_claim_stale_after(),
+                owner=owner,
+                claim_completed=(doc_status == IngestionStatus.COMPLETED.value),
+            )
+            if claimed is None:
+                # another worker is already (re)processing this source
+                continue
+
+        # ---- record the phase, then execute ----
+        if start_phase == PHASE_EMBEDDING:
+            await set_phase(
+                ccat.agent_key, scope, source_name,
+                PHASE_EMBEDDING,
+                embedder_name=active_embedder_name,
+                type_="url" if is_url(source_name) else "file",
+                chat_id=chat_id,
+            )
+        else:
+            await set_phase(
+                ccat.agent_key, scope, source_name,
+                PHASE_PARSING_CHUNKING,
+                chunker_name=active_chunker_name,
+                type_="url" if is_url(source_name) else "file",
+                chat_id=chat_id,
+            )
+
         try:
             # chunks already stored for this source (chunk-reuse candidates)
             source_points = [
@@ -88,11 +248,11 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
                 if (p.payload or {}).get("metadata", {}).get("source") == source_name
             ]
 
-            if source_points:
+            if source_points and start_phase == PHASE_EMBEDDING:
                 # For episodic sources, the chat must still exist; otherwise the
                 # memory is orphaned and is cleaned up (matching the pre-reuse
                 # behavior where the source was skipped after the collection wipe).
-                if chat_id and not (stray_cat := await ccat._find_stray_cat(str(chat_id))):
+                if chat_id and not (await ccat._find_stray_cat(str(chat_id))):
                     log.warning(
                         f"Stray cat with id {chat_id} not found. Cleaning up {source.path}/{source.name}"
                     )
@@ -155,8 +315,8 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
                             meta = (p.payload or {}).get("metadata", {})
                             image_file = meta.get("image_file")
                             root_dir = ccat.agent_key
-                            if chat_id := meta.get("chat_id"):
-                                root_dir = os.path.join(root_dir, str(chat_id))
+                            if metadata_chat := meta.get("chat_id"):
+                                root_dir = os.path.join(root_dir, str(metadata_chat))
                             image_bytes = (
                                 ccat.file_manager.read_file(image_file, root_dir)
                                 if image_file
@@ -236,24 +396,26 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
                     collection_name=str(collection_name), points=points
                 )
                 counter += 1
-                await _set_status(ccat, source_name, IngestionStatus.COMPLETED, chat_id=chat_id)
+
+                # Token accounting + completion signal on the chunk-reuse path:
+                # fire the SAME public hook rabbit_hole fires after storing, so
+                # analytics (token usage) and any consumer of "source stored"
+                # (e.g. ingestion_status -> COMPLETED) are informed. We do NOT
+                # fire before_rabbithole_*: the reused chunks are already
+                # catalogued and must not be re-split/summarized.
+                await ccat.plugin_manager.execute_hook(
+                    "after_rabbithole_stored_documents", source_name, points, caller=cat,
+                )
                 continue
 
-            # No reusable chunks for this source (e.g. the collection was just
-            # recreated by initialize): fall back to a full re-ingest from the
-            # source file/URL.
+            # Full re-ingest path (parsing_chunking): chunks are missing or stale.
+            # First drop any orphan image files/points left by a previous
+            # incomplete parse, so the re-ingest starts clean.
+            await _cleanup_orphan_images(ccat, collection_name, source_name, chat_id)
+
             content_type = None
             if source.content:
                 content_type, _ = guess_file_type(source.content)
-
-            cat = ccat
-            if chat_id:
-                if not (stray_cat := await ccat._find_stray_cat(str(chat_id))):
-                    log.warning(
-                        f"Stray cat with id {chat_id} not found. Skipping file {source.path}/{source.name}"
-                    )
-                    continue
-                cat = stray_cat
 
             await rabbit_hole.ingest_file(
                 cat=cat,
@@ -264,7 +426,8 @@ async def reembed_sources(ccat, collection_name: VectorMemoryType, stored_source
                 content_type=content_type,
             )
             counter += 1
-            await _set_status(ccat, source_name, IngestionStatus.COMPLETED, chat_id=chat_id)
+            # ingest_file already fires after_rabbithole_stored_documents ->
+            # ingestion_status sets the row to COMPLETED (status accounting).
         except Exception as e:  # noqa: BLE001 - a failing source must not abort the pass
             log.error(f"Agent id: {ccat._id}. Error re-embedding source {source_name}: {e}")
             await _set_status(ccat, source_name, IngestionStatus.ERROR, error=str(e), chat_id=chat_id)

@@ -30,6 +30,16 @@ class IngestionStatus(Enum):
     ERROR = "error"
 
 
+#: Work phases (diary of what the source is doing), stored in ``doc["phase"]``.
+#: ``parsing_chunking`` and ``embedding`` are the recovery-relevant phases: a
+#: crash while ``phase=embedding`` means chunks are intact and only the vectors
+#: must be recomputed; ``phase=parsing_chunking`` means chunks must be
+#: regenerated (full re-ingest). ``downloading`` applies to URLs.
+PHASE_DOWNLOADING = "downloading"
+PHASE_PARSING_CHUNKING = "parsing_chunking"
+PHASE_EMBEDDING = "embedding"
+
+
 def status_key(agent_id: str, scope: str, source: str) -> str:
     """Redis key for a source's ingestion status.
 
@@ -64,12 +74,24 @@ async def set_status(
     status: IngestionStatus,
     chat_id: Optional[str] = None,
     error: Optional[str] = None,
+    phase: str | None = None,
+    embedder_name: str | None = None,
+    chunker_name: str | None = None,
+    clear_phase: bool = False,
     extra: Optional[Dict] = None,
 ) -> Dict:
     """Write (or update) the ingestion-status doc for a source.
 
     ``created_at`` is preserved across updates; ``updated_at`` is bumped on
     every write; ``error_at`` is set when ``status`` is ERROR.
+
+    **Merge semantics (important)**: ``phase`` / ``embedder_name`` /
+    ``chunker_name`` are updated ONLY when explicitly provided (not None).
+    Existing callers that write status without these fields (heartbeat,
+    ``after_rabbithole_stored_documents``, ``mark_file_missing``) therefore
+    never clobber the engine-written phase/embedder/chunker of a row.
+    ``clear_phase`` is the explicit way to drop the phase when the source
+    reaches a terminal state (e.g. ``completed``).
 
     Args:
         agent_id: The agent (chatbot) id.
@@ -79,6 +101,13 @@ async def set_status(
         status: The new lifecycle state.
         chat_id: The conversation id, when the ingestion is chat-scoped.
         error: The error message, when ``status`` is ERROR.
+        phase: The current work phase (``downloading``, ``parsing_chunking``,
+            ``embedding``) — see :func:`set_phase`. Updated only when provided.
+        embedder_name: The embedder that produced the stored vectors. Updated
+            only when provided.
+        chunker_name: The chunker that produced the stored chunks. Updated
+            only when provided.
+        clear_phase: When True, drop the ``phase`` field from the doc.
         extra: Optional extra fields merged into the stored doc.
 
     Returns:
@@ -90,7 +119,12 @@ async def set_status(
     existing = await _read_doc(key)
     created_at = existing.get("created_at", now) if existing else now
 
-    doc = {
+    # Start from a copy of the existing doc so fields NOT provided in this
+    # write (phase/embedder_name/chunker_name/extra) survive — the merge
+    # semantics that lets a plain lifecycle write coexist with engine-written
+    # metadata. Fields explicitly overwritten below always win.
+    doc = dict(existing or {})
+    doc.update({
         "source": source,
         "scope": scope,
         "chat_id": chat_id,
@@ -100,11 +134,65 @@ async def set_status(
         "error_at": now if status == IngestionStatus.ERROR else None,
         "created_at": created_at,
         "updated_at": now,
-    }
+    })
+    # Merge semantics: only update phase/embedder/chunker when explicitly given
+    if phase is not None:
+        doc["phase"] = phase
+    if embedder_name is not None:
+        doc["embedder_name"] = embedder_name
+    if chunker_name is not None:
+        doc["chunker_name"] = chunker_name
+    if clear_phase:
+        doc.pop("phase", None)
     if extra:
         doc.update(extra)
     await crud.store(key, doc)
     return doc
+
+
+async def set_phase(
+    agent_id: str,
+    scope: str,
+    source: str,
+    phase: str,
+    *,
+    embedder_name: str | None = None,
+    chunker_name: str | None = None,
+    type_: str = "file",
+    chat_id: str | None = None,
+) -> dict:
+    """Transition a source into a work phase.
+
+    Atomic ``status=PROCESSING`` + ``phase=<phase>`` write, bumping
+    ``updated_at`` so the row is restartable on crash and never looks stale
+    to another worker mid-phase. Records ``embedder_name`` (for the
+    ``embedding`` phase) or ``chunker_name`` (for the ``parsing_chunking``
+    phase) at the START of the phase that consumes them.
+
+    Args:
+        agent_id: The agent (chatbot) id.
+        scope: ``"agent"`` or a conversation ``chat_id``.
+        source: The ingested file name or URL.
+        phase: ``downloading`` | ``parsing_chunking`` | ``embedding``.
+        embedder_name: Recorded when provided (used at ``embedding`` start).
+        chunker_name: Recorded when provided (used at ``parsing_chunking`` start).
+        type_: ``"file"`` or ``"url"``.
+        chat_id: The conversation id, when chat-scoped.
+
+    Returns:
+        The stored status document.
+    """
+    return await set_status(
+        agent_id,
+        scope,
+        source,
+        type_=type_,
+        status=IngestionStatus.PROCESSING,
+        chat_id=chat_id,
+        phase=phase,
+        embedder_name=embedder_name,
+        chunker_name=chunker_name,
+    )
 
 
 async def get_status(agent_id: str, scope: str, source: str) -> Optional[Dict]:
@@ -119,6 +207,7 @@ async def claim_source_for_resume(
     *,
     stale_after: float,
     owner: str,
+    claim_completed: bool = False,
 ) -> Optional[Dict]:
     """Atomically claim a source for (re)ingestion under a per-source lock.
 
@@ -131,6 +220,11 @@ async def claim_source_for_resume(
     ``uploaded``/``processing`` row means another worker is already handling
     it, so this call returns None instead of double-ingesting.
 
+    When ``claim_completed`` is True a ``completed`` row is ALSO claimable
+    (regardless of staleness): used by the ingestion engine to re-embed a
+    source whose embedder/chunker changed. The engine must re-check the
+    mismatch itself before claiming. ``resume.py`` keeps the default False.
+
     On success the row is reset to PROCESSING with ``resume_owner`` /
     ``resume_at`` / bumped ``updated_at`` so other workers see it as taken.
 
@@ -141,6 +235,8 @@ async def claim_source_for_resume(
         stale_after: Minimum age of ``updated_at`` (seconds) for the entry to
             be claimable — protects in-flight work from being double-processed.
         owner: Identifier of the claiming worker (e.g. ``pid``).
+        claim_completed: Whether a ``completed`` row may be claimed for
+            re-embedding (engine passes True after its own mismatch check).
 
     Returns:
         The claimed (updated) status doc, or None when not claimable.
@@ -155,22 +251,30 @@ async def claim_source_for_resume(
             return None
 
         status = doc.get("status")
-        # Only stale in-flight rows (uploaded/processing) or errors are
-        # restartable. Completed rows are never re-claimed.
-        if status not in (
+        if status == IngestionStatus.COMPLETED.value:
+            # Completed rows are never re-claimed by the resume sweep; the
+            # engine may claim them for re-embedding only when it already
+            # verified a real embedder/chunker mismatch.
+            if not claim_completed:
+                return None
+        elif status not in (
             IngestionStatus.UPLOADED.value,
             IngestionStatus.PROCESSING.value,
             IngestionStatus.ERROR.value,
         ):
             return None
 
-        try:
-            updated_at = float(doc.get("updated_at") or 0)
-        except (TypeError, ValueError):
-            updated_at = 0
-        if time.time() - updated_at < stale_after:
-            # fresh: another worker is handling it right now
-            return None
+        # Fresh in-flight work (uploaded/processing) is only claimable when
+        # stale; completed rows (engine re-embed) have no in-flight counterpart,
+        # so they bypass the staleness gate: a completed row is never "in flight".
+        if status != IngestionStatus.COMPLETED.value:
+            try:
+                updated_at = float(doc.get("updated_at") or 0)
+            except (TypeError, ValueError):
+                updated_at = 0
+            if time.time() - updated_at < stale_after:
+                # fresh: another worker is handling it right now
+                return None
 
         now = generate_timestamp()
         doc.update({
