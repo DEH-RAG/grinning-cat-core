@@ -614,9 +614,16 @@ class EfficientIngestionEngine(BaseIngestionEngine):
     a configurable concurrency cap (settings category ``ingestion``).
     """
 
-    def __init__(self, reembed_max_concurrency: int = 5, **kwargs):
+    def __init__(self, ingestion_max_concurrency: int = 5, reembed_max_concurrency: int | None = None, **kwargs):
         super().__init__(**kwargs)
-        self.reembed_max_concurrency = max(1, int(reembed_max_concurrency))
+        # legacy alias: pre-rename configs saved `reembed_max_concurrency`
+        if (
+            reembed_max_concurrency is not None
+            and reembed_max_concurrency > 0
+            and ingestion_max_concurrency == 5
+        ):
+            ingestion_max_concurrency = reembed_max_concurrency
+        self.ingestion_max_concurrency = max(1, int(ingestion_max_concurrency))
 
     async def ingest_file(
         self,
@@ -728,7 +735,7 @@ class EfficientIngestionEngine(BaseIngestionEngine):
             # then re-embed every stored file/procedure, limiting concurrent
             # embeddings to avoid overwhelming resources (tunable via the plugin
             # settings, category ingestion)
-            semaphore = asyncio.Semaphore(self.reembed_max_concurrency)
+            semaphore = asyncio.Semaphore(self.ingestion_max_concurrency)
 
             async def embed_with_limit(entry_):
                 async with semaphore:
