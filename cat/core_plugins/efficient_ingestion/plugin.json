@@ -6,5 +6,5 @@
     "tags": "core, default, ingestion, re-embed, re-ingestion, embedder",
     "thumb": "",
     "version": "0.0.1",
-    "dependencies": ["ingestion_status"]
+    "dependencies": ["ingestion_status", "multimodal_ingestion"]
 }
