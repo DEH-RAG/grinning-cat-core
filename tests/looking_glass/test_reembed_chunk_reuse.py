@@ -1097,3 +1097,130 @@ async def test_inflight_embedding_phase_chunker_mismatch_full_reingest(cheshire_
     assert len(final_points) == 1
     assert final_points[0].payload["page_content"] == "fresh after chunker change"
     assert len(final_points[0].vector) == FakeEmbedder.size
+
+
+async def test_url_without_web_points_recovered_from_status(cheshire_cat, monkeypatch):
+    """[restart] A URL in-flight at ``parsing_chunking`` whose points were deleted
+    (crash right after the clean-sweep) is recovered from the STATUS doc, not from
+    the chunk points: the machine re-downloads the URL and completes."""
+    import time as _time
+
+    import cat.core_plugins.efficient_ingestion.reembed as reembed_mod
+    from cat.core_plugins.ingestion_status.registry import (
+        PHASE_PARSING_CHUNKING,
+        IngestionStatus,
+        get_status,
+    )
+
+    url = "https://example.com/doc.pdf"
+    # NO web points at all: the URL lives ONLY in the status doc (a mid-parse
+    # crash after the clean-sweep deleted the chunks)
+    fake = FakeVectorHandler(points=[])
+
+    downloads = []
+
+    async def fake_resolve_source_bytes(self, file, filename, content_type):
+        downloads.append((file, filename))
+        return None, b"%PDF-1.4 fake content", "application/pdf", False
+
+    monkeypatch.setattr(RabbitHole, "_resolve_source_bytes", fake_resolve_source_bytes)
+
+    async def fake_parse_and_chunk(ccat, rabbit_hole, source, file_bytes, content_type, cat):
+        return [Document(page_content="url parsed chunk")], []
+
+    monkeypatch.setattr(reembed_mod, "_parse_and_chunk", fake_parse_and_chunk)
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+
+    # stale processing row at parsing_chunking (container was down)
+    old = _time.time() - 1000
+    await crud.store(_status_key(url), {
+        "source": url, "scope": "agent", "chat_id": None, "type": "url",
+        "status": IngestionStatus.PROCESSING.value, "phase": PHASE_PARSING_CHUNKING,
+        "error": None, "error_at": None, "created_at": old, "updated_at": old,
+    })
+
+    source = StoredSourceWithMetadata(name=url, path=url, content=None, metadata={})
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [source])
+
+    # the URL was re-downloaded (recovered from the status entry, NOT from chunks)
+    assert downloads == [(url, url)]
+    # and the source completed
+    doc = await get_status(agent_id, "agent", url)
+    assert doc is not None
+    assert doc["status"] == "completed"
+
+
+async def test_url_status_written_before_clean_sweep(cheshire_cat, monkeypatch):
+    """[order] The status doc holding the URL is written (set_phase) BEFORE the
+    clean-sweep deletes the chunk points, so the URL value is never lost to the
+    artifact deletion — the recovery derives the URL from the status, not from
+    the points."""
+    import time as _time
+
+    import cat.core_plugins.efficient_ingestion.reembed as reembed_mod
+    from cat.core_plugins.ingestion_status.registry import (
+        IngestionStatus,
+    )
+
+    url = "https://example.com/order.pdf"
+    # the URL currently lives in the web points (completed row whose chunker
+    # changed -> forced parsing_chunking)
+    fake = FakeVectorHandler(points=[_record(url, "old chunk")])
+
+    event_order = []
+
+    # intercept the status writes (through the registry crud.store)
+    real_store = crud.store
+
+    async def recording_store(key, value, path="$", nx=False, xx=False, expire=None):
+        if isinstance(key, str) and key.startswith(f"agents:{agent_id}:ingestion:"):
+            event_order.append(("status", value.get("source")))
+        return await real_store(key, value, path=path, nx=nx, xx=xx, expire=expire)
+
+    monkeypatch.setattr(crud, "store", recording_store)
+
+    # intercept the point deletions
+    real_delete = fake.delete_tenant_points
+
+    async def recording_delete(collection_name, metadata=None):
+        if isinstance(metadata, dict) and metadata.get("source") == url:
+            event_order.append(("delete_points", url))
+        return await real_delete(collection_name, metadata)
+
+    fake.delete_tenant_points = recording_delete
+
+    downloads = []
+
+    async def fake_resolve_source_bytes(self, file, filename, content_type):
+        downloads.append((file, filename))
+        return None, b"%PDF-1.4 order content", "application/pdf", False
+
+    monkeypatch.setattr(RabbitHole, "_resolve_source_bytes", fake_resolve_source_bytes)
+
+    async def fake_parse_and_chunk(ccat, rabbit_hole, source, file_bytes, content_type, cat):
+        return [Document(page_content="order parsed chunk")], []
+
+    monkeypatch.setattr(reembed_mod, "_parse_and_chunk", fake_parse_and_chunk)
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+
+    # completed + chunker mismatch -> parsing_chunking
+    old = _time.time() - 1000
+    await crud.store(_status_key(url), {
+        "source": url, "scope": "agent", "chat_id": None, "type": "url",
+        "status": IngestionStatus.COMPLETED.value,
+        "embedder_name": "FakeEmbedder", "chunker_name": "OldChunker",
+        "error": None, "error_at": None, "created_at": old, "updated_at": old,
+    })
+
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_url_source(url)])
+
+    # the status write (URL persisted to Redis) precedes the artifact deletion
+    status_idx = [i for i, e in enumerate(event_order) if e[0] == "status"]
+    delete_idx = [i for i, e in enumerate(event_order) if e[0] == "delete_points"]
+    assert status_idx, "no status write happened"
+    assert delete_idx, "no point delete happened"
+    assert status_idx[0] < delete_idx[0], "status must be written BEFORE the clean-sweep"
+
+
+def _url_source(url):
+    return StoredSourceWithMetadata(name=url, path=url, content=None, metadata={})
