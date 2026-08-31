@@ -7,20 +7,19 @@ implementation and plugins can register more efficient ones via the
 ``factory_allowed_ingestions`` hook (``efficient_ingestion`` registers
 ``EfficientIngestionConfiguration``).
 
-The engine selection entry lives in the global ``system:agent`` settings list
-under the ``re-ingestion`` category (name ``ingestion_engine``, value = config
-class name). Without an explicit entry the first non-core configuration
-contributed by a plugin wins; otherwise the base one is used.
+The engine selection follows the embedder pattern: the active configuration is
+the SINGLE setting of the ``ingestion`` category (``name`` = configuration class
+name, value = its settings) stored in the global ``system:agent`` list. There is
+NO separate selection entry (that would make the category non-unique). Without a
+saved entry the first non-core configuration contributed by a plugin wins;
+otherwise the base one is used.
 """
 
 
 from cat.db.cruds import settings as crud_settings
 from cat.db.database import DEFAULT_SYSTEM_KEY
-from cat.db.models import Setting
 from cat.log import log
 from cat.services.factory.models import BaseFactoryConfigModel
-
-_SELECTION_NAME = "ingestion_engine"
 
 
 class BaseIngestionEngine:
@@ -103,7 +102,7 @@ class BaseIngestionConfiguration(BaseFactoryConfigModel):
 
 
 def build_factory(lizard) -> "ServiceFactory":
-    """ServiceFactory for the ``re-ingestion`` category (system scope)."""
+    """ServiceFactory for the ``ingestion`` category (system scope)."""
     # local import: avoids the circular service_factory <-> factory.ingestion
     from cat.services.service_factory import ServiceFactory
 
@@ -111,7 +110,7 @@ def build_factory(lizard) -> "ServiceFactory":
         agent_key=lizard.agent_key,
         hook_manager=lizard.plugin_manager,
         factory_allowed_handler_name="factory_allowed_ingestions",
-        setting_category="re-ingestion",
+        setting_category="ingestion",
         schema_name="ingestionConfigurationName",
     )
 
@@ -121,17 +120,15 @@ async def _allowed_classes(lizard) -> list[type[BaseFactoryConfigModel]]:
 
 
 async def resolved_config_name(lizard) -> str:
-    """Effective engine selection: explicit entry, else plugin class, else base."""
+    """Effective engine selection: the saved config of the ``ingestion`` category,
+    else the first plugin class, else the base."""
     classes = await _allowed_classes(lizard)
 
-    try:
-        explicit = await crud_settings.get_setting_by_name(DEFAULT_SYSTEM_KEY, _SELECTION_NAME)
-        explicit_value = (explicit or {}).get("value")
-        explicit_name = explicit_value.get("engine") if isinstance(explicit_value, dict) else None
-        if isinstance(explicit_name, str) and any(c.__name__ == explicit_name for c in classes):
-            return explicit_name
-    except Exception as e:  # noqa: BLE001 - resolution must never break the route
-        log.error(f"ingestion engine selection read failed: {e}")
+    saved = await crud_settings.get_settings_by_category(DEFAULT_SYSTEM_KEY, "ingestion")
+    if saved and isinstance(saved.get("name"), str):
+        saved_name = saved["name"]
+        if any(c.__name__ == saved_name for c in classes):
+            return saved_name
 
     non_core = [c for c in classes if c is not BaseIngestionConfiguration]
     if non_core:
@@ -160,11 +157,3 @@ async def resolve_ingestion_engine(lizard) -> BaseIngestionEngine | None:
     except Exception as e:  # noqa: BLE001
         log.error(f"Failed to instantiate ingestion engine '{name}': {e!r}")
         return None
-
-
-async def store_selection(config_name: str) -> None:
-    """Save the explicit engine selection (``system:agent``, ``re-ingestion``)."""
-    await crud_settings.upsert_setting_by_name(
-        DEFAULT_SYSTEM_KEY,
-        Setting(name=_SELECTION_NAME, value={"engine": config_name}, category="re-ingestion"),
-    )

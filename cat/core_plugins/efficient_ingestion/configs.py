@@ -1,6 +1,6 @@
 """Factory configuration for the efficient ingestion engine.
 
-Registers ``EfficientIngestionConfiguration`` in the ``re-ingestion`` category
+Registers ``EfficientIngestionConfiguration`` in the ``ingestion`` category
 through the ``factory_allowed_ingestions`` hook, so the engine can be selected
 (replaceable class pattern, like the embedders).
 """
@@ -12,7 +12,7 @@ from cat.services.factory.models import BaseFactoryConfigModel
 
 
 class EfficientIngestionConfiguration(BaseFactoryConfigModel):
-    """Configuration of the efficient re-embed engine (category ``re-ingestion``)."""
+    """Configuration of the efficient re-embed engine (category ``ingestion``)."""
 
     reembed_max_concurrency: int = 5
 

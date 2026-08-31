@@ -509,13 +509,10 @@ class RabbitHole:
 # hook the docs before they are stored in the vector memory
         docs = await plugin_manager.execute_hook("before_rabbithole_stores_documents", docs, caller=self.stray or self.cat)
 
-        # Store-time sizing guard for documents added by post-chunking hooks
-        # (e.g. CAT_ALOG's catalogue card). These are split into budget-compliant
-        # in-place sub-chunks (metadata inherited, ordering preserved), so the
-        # full content is always stored with no loss. Atomic plugin units that
-        # wrap their full text into metadata (e.g. CAT_ALOG's full_card) keep the
-        # whole unit retrievable from any of their sub-chunks.
-        docs = self._split_oversized(docs, embedder)
+        # The token-budget split (formerly _split_oversized) is owned by the
+        # efficient_ingestion plugin via the before/finalize hooks: the docs
+        # may be re-sized so the embed below is 1:1 with the stored points.
+        # The default no-op preserves upstream behavior (no sizing).
 
         # hook the points before they are stored in the vector memory
         valid_documents = list(filter(lambda doc_: doc_.page_content.strip(), docs))
@@ -585,117 +582,19 @@ class RabbitHole:
         # max_input_tokens. This is a build-phase step, fully separate from the
         # embedding loop in store_documents: it produces the correct final list
         # (splitting oversized chunks into in-place sub-chunks) so the later
-        # 1:1 embed/store pairing is never broken by re-chunking mid-loop.
+        # 1:1 embed/store pairing is never broken by re-chunking mid-loop. The
+        # actual split is owned by a plugin (efficient_ingestion) through the
+        # finalize_oversized_chunks hook; the default no-op preserves the
+        # upstream behavior (no token-budget split).
         try:
-            embedder = await self.cat.lizard.embedder()
-            docs = self._split_oversized(docs, embedder)
+            docs = await self.cat.plugin_manager.execute_hook(
+                "finalize_oversized_chunks", docs, caller=self.cat,
+            )
         except Exception as e:
             # Log error but don't fail the entire process
             log.warning(f"Failed to finalize oversized chunks: {e}. Proceeding with original chunks.")
 
         return docs
-
-    def _split_oversized(self, docs: List[Document], embedder) -> List[Document]:
-        """Finalize a document list so no chunk exceeds the embedder's input limit.
-
-        This is a *pure fold* over ``docs``: it reads the input list and returns a
-        brand-new list, never mutating ``docs`` while scanning it. Any oversized
-        chunk is split into budget-compliant sub-chunks that replace it at its own
-        index, so the relative order of all chunks is preserved and each sub-chunk
-        becomes its own stored point (with its own payload) in the vector database.
-
-        Args:
-            docs: The chunked documents produced by the configured chunker.
-            embedder: The active embedder, whose ``max_input_tokens`` ceiling is
-                enforced. ``None`` or a missing limit disables the split.
-
-        Returns:
-            A new list of documents where every chunk is at or under the limit.
-        """
-        max_tokens = getattr(embedder, "max_input_tokens", None)
-        if max_tokens is None or max_tokens <= 0:
-            return docs
-
-        sized: List[Document] = []
-        for doc in docs:
-            token_count = self._doc_tokens(doc, embedder)
-            if token_count <= max_tokens:
-                sized.append(doc)
-                continue
-            sub_chunks = self._split_to_budget(doc, embedder)
-            source = doc.metadata.get("source") if isinstance(doc.metadata, dict) else None
-            log.debug(
-                f"OVERSIZED_SPLIT src={source} estimated_tokens={token_count} "
-                f"max_input_tokens={max_tokens} split_into={len(sub_chunks)}"
-            )
-            sized.extend(sub_chunks)
-        return sized
-
-    def _doc_tokens(self, doc: Document, embedder) -> int:
-        """Conservative token count for a document chunk.
-
-        Prefers the active embedder's own ``_estimate_tokens`` when available so
-        the count matches the model that will embed the chunk; otherwise falls
-        back to a ~3 chars/token heuristic (never an undercount).
-        """
-        if embedder is not None and hasattr(embedder, "_estimate_tokens"):
-            return embedder._estimate_tokens(doc.page_content)
-        return max(1, len(doc.page_content) // 3)
-
-    def _split_to_budget(self, doc: Document, embedder) -> List[Document]:
-        """Split one oversized document into budget-compliant sub-chunks.
-
-        Word-based, linear split around the token budget, carrying the original
-        metadata (source/payload) forward to every sub-chunk so nothing stored
-        in the vector DB is lost.
-
-        Sub-chunks are sized by MEASURING candidates with the embedder's own
-        ``_estimate_tokens`` (real tokenizer when available); a coarse
-        estimate-then-refine pass keeps it linear even for very long documents.
-        """
-        max_tokens = getattr(embedder, "max_input_tokens", None)
-        if max_tokens is None or max_tokens <= 0:
-            return [doc]
-
-        words = doc.page_content.split()
-        if not words:
-            return [doc]
-
-        def doc_tokens(text: str) -> int:
-            if embedder is not None and hasattr(embedder, "_estimate_tokens"):
-                return max(1, embedder._estimate_tokens(text))
-            return max(1, len(text) // 3)
-
-        # avg tokens per word for THIS document (sampled on 200 words), used
-        # to guess chunk boundaries in the coarse pass
-        sample = words[:200]
-        sample_tokens = max(1, doc_tokens(" ".join(sample)))
-        approx_tpw = sample_tokens / max(1, len(sample))
-        per_chunk_words = max(1, int(max_tokens / approx_tpw))
-
-        sub_docs: List[Document] = []
-        start = 0
-        n = len(words)
-        while start < n:
-            part = words[start:start + per_chunk_words]
-            if doc_tokens(" ".join(part)) <= max_tokens:
-                take = len(part)
-            else:
-                # refine: binary-search the largest prefix within budget
-                lo, hi = 0, len(part)
-                while lo < hi:
-                    mid = (lo + hi + 1) // 2
-                    if doc_tokens(" ".join(part[:mid])) <= max_tokens:
-                        lo = mid
-                    else:
-                        hi = mid - 1
-                take = max(1, lo)  # pathological single word: still emit it
-            sub_docs.append(Document(
-                page_content=" ".join(words[start:start + take]),
-                metadata=doc.metadata,
-            ))
-            start += take
-        return sub_docs
 
     def _merge_short_chunks(self, docs: List[Document], chunker: BaseChunker) -> List[Document]:
         """Safely merge short chunks with adjacent ones.

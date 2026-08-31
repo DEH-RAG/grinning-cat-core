@@ -15,7 +15,7 @@ from cat.services.service_factory import ServiceFactory
 async def _run_ingestion_on_embedder_change(lizard) -> None:
     """Re-embed pass on embedder change, via the replaceable ingestion engine.
 
-    The engine is resolved through the ServiceFactory (``re-ingestion``
+    The engine is resolved through the ServiceFactory (``ingestion``
     category): the core provides ``BaseIngestionConfiguration`` (upstream
     parity) and plugins can register more efficient implementations through
     the ``factory_allowed_ingestions`` hook.
@@ -87,7 +87,7 @@ async def upsert_embedder_setting(
     current_embedder = await lizard.embedder()
 
     # a characterizing feature of the embedder has been updated: run the
-    # replaceable ingestion engine (factory: re-ingestion category)
+    # replaceable ingestion engine (factory: ingestion category)
     if previous_embedder != current_embedder:
         run_background_task(
             background_tasks,

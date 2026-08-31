@@ -248,20 +248,23 @@ async def test_reuse_does_not_call_ingest_file(cheshire_cat, monkeypatch):
 
 
 async def test_reuse_invokes_split_oversized(cheshire_cat, monkeypatch):
-    """(b) _split_oversized is invoked when the new embedder limit < chunk size."""
+    """(b) The token-budget splitter (now in the plugin) is invoked when the new
+    embedder limit < chunk size."""
+    import cat.core_plugins.efficient_ingestion.reembed as reembed_mod
+
     big_chunk = "x" * 5000
     fake = FakeVectorHandler(points=[_record("big.txt", big_chunk)])
     await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
 
     calls = []
 
-    def recording_split(self, docs, embedder):
+    def recording_split(docs, embedder):
         calls.append((list(docs), embedder))
         return docs
 
-    monkeypatch.setattr(RabbitHole, "_split_oversized", recording_split)
+    monkeypatch.setattr(reembed_mod, "split_oversized", recording_split)
 
-    await reembed_sources(cheshire_cat, 
+    await reembed_sources(cheshire_cat,
         VectorMemoryType.DECLARATIVE, [_source("big.txt")],
     )
 
