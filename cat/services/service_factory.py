@@ -194,3 +194,8 @@ class ServiceFactory:
     @property
     def agent_key(self):
         return self._agent_key
+
+    @property
+    def hook_manager(self):
+        """The MadHatter instance used to execute hooks (e.g. by ServiceUpdater)."""
+        return self._hook_manager
