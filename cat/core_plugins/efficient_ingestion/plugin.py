@@ -44,7 +44,7 @@ async def finalize_oversized_chunks(docs: List[Document], cat) -> List[Document]
     return split_oversized(docs, embedder)
 
 
-@hook(priority=0)
+@hook(priority=100)
 async def before_rabbithole_stores_documents(docs: List[Document], cat) -> List[Document]:
     """Apply the token-budget split on the store path of the core engine.
 
