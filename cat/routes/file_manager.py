@@ -14,6 +14,7 @@ from cat.routes.routes_utils import (
     UpsertSettingResponse,
     run_background_task,
     sanitize_source_name,
+    has_write_permission,
 )
 from cat.services.factory.file_manager import FileResponse
 from cat.services.memory.models import VectorMemoryType
@@ -57,7 +58,7 @@ async def get_file_managers_settings(
         setting_category="file_manager",
         schema_name="fileManagerName",
     )
-    return await sf.get_factory_settings()
+    return await sf.get_factory_settings(reveal=has_write_permission(info.user.permissions, AuthResource.FILE_MANAGER))
 
 
 @router.get("/settings/{file_manager_name}", response_model=GetSettingResponse)
@@ -74,7 +75,7 @@ async def get_file_manager_settings(
         setting_category="file_manager",
         schema_name="fileManagerName",
     )
-    return await sf.get_factory_setting(file_manager_name)
+    return await sf.get_factory_setting(file_manager_name, reveal=has_write_permission(info.user.permissions, AuthResource.FILE_MANAGER))
 
 
 @router.put("/settings/{file_manager_name}", response_model=UpsertSettingResponse)

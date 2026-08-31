@@ -4,7 +4,7 @@ from fastapi import APIRouter, Body, BackgroundTasks
 from cat.auth.connection import AuthorizedInfo
 from cat.auth.permissions import AuthPermission, AuthResource, check_permissions
 from cat.db.cruds import settings as crud_settings
-from cat.routes.routes_utils import GetSettingsResponse, GetSettingResponse, UpsertSettingResponse, run_background_task
+from cat.routes.routes_utils import GetSettingsResponse, GetSettingResponse, UpsertSettingResponse, run_background_task, has_write_permission
 from cat.services.service_factory import ServiceFactory
 
 router = APIRouter(tags=["Vector Database"], prefix="/vector_database")
@@ -24,7 +24,7 @@ async def get_vector_databases_settings(
         setting_category="vector_database",
         schema_name="vectorDatabaseName",
     )
-    return await sf.get_factory_settings()
+    return await sf.get_factory_settings(reveal=has_write_permission(info.user.permissions, AuthResource.VECTOR_DATABASE))
 
 
 @router.get(
@@ -43,7 +43,7 @@ async def get_vector_database_settings(
         setting_category="vector_database",
         schema_name="vectorDatabaseName",
     )
-    return await sf.get_factory_setting(vector_database_name)
+    return await sf.get_factory_setting(vector_database_name, reveal=has_write_permission(info.user.permissions, AuthResource.VECTOR_DATABASE))
 
 
 @router.put(
