@@ -8,6 +8,7 @@ from cat.routes.routes_utils import (
     GetSettingsResponse,
     UpsertSettingResponse,
     run_background_task,
+    has_write_permission,
 )
 from cat.services.service_factory import ServiceFactory
 
@@ -44,7 +45,7 @@ async def get_embedders_settings(
         setting_category="embedder",
         schema_name="languageEmbedderName",
     )
-    return await sf.get_factory_settings()
+    return await sf.get_factory_settings(reveal=has_write_permission(info.user.permissions, AuthResource.EMBEDDER))
 
 
 @router.get("/settings/{embedder_name}", response_model=GetSettingResponse)
@@ -61,7 +62,7 @@ async def get_embedder_settings(
         setting_category="embedder",
         schema_name="languageEmbedderName",
     )
-    return await sf.get_factory_setting(embedder_name)
+    return await sf.get_factory_setting(embedder_name, reveal=has_write_permission(info.user.permissions, AuthResource.EMBEDDER))
 
 
 @router.put("/settings/{embedder_name}", response_model=UpsertSettingResponse)

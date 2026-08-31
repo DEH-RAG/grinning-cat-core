@@ -6,7 +6,7 @@ from cat.db.cruds import settings as crud_settings
 from cat.exceptions import CustomValidationException
 from cat.log import log
 from cat.looking_glass.mad_hatter.mad_hatter import MadHatter
-from cat.routes.routes_utils import GetSettingResponse, GetSettingsResponse
+from cat.routes.routes_utils import GetSettingResponse, GetSettingsResponse, mask_secret_values
 from cat.services.factory.agentic_workflow import CoreAgenticWorkflowConfig
 from cat.services.factory.auth_handler import CoreAuthConfig
 from cat.services.factory.chunker import RecursiveTextChunkerSettings
@@ -144,7 +144,7 @@ class ServiceFactory:
 
         return result
 
-    async def get_factory_settings(self) -> GetSettingsResponse:
+    async def get_factory_settings(self, reveal: bool = True) -> GetSettingsResponse:
         async def get_class_value(class_name: str) -> Dict[str, Any]:
             if class_name != saved_settings["name"]:
                 return {}
@@ -156,13 +156,13 @@ class ServiceFactory:
 
         settings = [GetSettingResponse(
             name=class_name,
-            value=await get_class_value(class_name),
+            value=mask_secret_values(await get_class_value(class_name), reveal),
             scheme=scheme
         ) for class_name, scheme in schemas.items()]
 
         return GetSettingsResponse(settings=settings, selected_configuration=saved_settings["name"])  # type: ignore[index]
 
-    async def get_factory_setting(self, configuration_name: str) -> GetSettingResponse:
+    async def get_factory_setting(self, configuration_name: str, reveal: bool = True) -> GetSettingResponse:
         schemas = await self.get_schemas()
 
         allowed_configurations = list(schemas.keys())
@@ -174,6 +174,7 @@ class ServiceFactory:
 
         setting = await crud_settings.get_setting_by_name(self._agent_key, configuration_name)
         setting = {} if setting is None else factory_class.parse_config(setting["value"])
+        setting = mask_secret_values(setting, reveal)
 
         scheme = schemas[configuration_name]
 
