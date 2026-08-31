@@ -9,6 +9,8 @@ classes). A fake handler implementing the interface stands in for the vector DB.
 import hashlib
 import os
 
+from langchain_core.documents import Document
+
 from cat.core_plugins.efficient_ingestion.reembed import reembed_sources
 from cat.db import crud
 from cat.looking_glass.models import StoredSourceWithMetadata
@@ -270,18 +272,37 @@ async def test_reuse_invokes_split_oversized(cheshire_cat, monkeypatch):
     assert embedder is not None
 
 
-async def test_empty_lookup_falls_back_to_ingest_file(cheshire_cat, monkeypatch):
-    """(c) Empty lookups fall back to ingest_file."""
-    fake = FakeVectorHandler(points=[])  # no reusable chunks
-    ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+async def test_empty_lookup_falls_back_to_parsing(cheshire_cat, monkeypatch):
+    """(c) Empty lookups (no reusable chunks) fall back to the parsing_chunking phase.
 
-    await reembed_sources(cheshire_cat, 
-        VectorMemoryType.DECLARATIVE, [_source("test.txt")],
-    )
+    The phase machine parses the file and stores the chunks with EMPTY vectors,
+    then the embedding phase recomputes the vectors and stores them.
+    """
+    from io import BytesIO
 
-    assert ingest_calls == ["test.txt"]
-    # no chunk-reuse add happened
-    assert fake.added == []
+    import cat.core_plugins.efficient_ingestion.reembed as reembed_mod
+
+    fake = FakeVectorHandler(points=[])
+
+    async def fake_parse_and_chunk(ccat, rabbit_hole, source, file_bytes, content_type, cat):
+        return [Document(page_content="parsed chunk one"), Document(page_content="parsed chunk two")], []
+
+    monkeypatch.setattr(reembed_mod, "_parse_and_chunk", fake_parse_and_chunk)
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+
+    src = _source("test.txt")
+    src.content = BytesIO(b"file content")
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [src])
+
+    # not chunk-reuse: two phases ran -> two adds (empty-vector store + embedding store)
+    assert len(fake.added) == 2
+    # first add is the parsing store (empty vectors), then embedding replaces
+    first_phase_points = fake.added[0][1]
+    assert all(p.vector == {} for p in first_phase_points)
+    # the final (embedding) store carries real vectors
+    final_points = fake.added[-1][1]
+    assert len(final_points) == 2
+    assert all(len(p.vector) == FakeEmbedder.size for p in final_points)
 
 
 async def test_status_processing_then_completed(cheshire_cat, monkeypatch):
@@ -916,10 +937,18 @@ async def test_completed_embedder_mismatch_reembeds(cheshire_cat, monkeypatch):
 async def test_completed_chunker_mismatch_full_reingest(cheshire_cat, monkeypatch):
     """A completed row whose chunker differs from the current one is fully re-ingested
     (parsing_chunking phase), NOT chunk-reused."""
+    from io import BytesIO
+
+    import cat.core_plugins.efficient_ingestion.reembed as reembed_mod
     from cat.core_plugins.ingestion_status.registry import IngestionStatus, set_status
 
     fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
-    ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+
+    async def fake_parse_and_chunk(ccat, rabbit_hole, source, file_bytes, content_type, cat):
+        return [Document(page_content="fresh parsed chunk")], []
+
+    monkeypatch.setattr(reembed_mod, "_parse_and_chunk", fake_parse_and_chunk)
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
     # chunker mismatch (points exist but chunker changed) -> full re-ingest
     await set_status(
         agent_id, "agent", "test.txt",
@@ -927,11 +956,18 @@ async def test_completed_chunker_mismatch_full_reingest(cheshire_cat, monkeypatc
         embedder_name="FakeEmbedder", chunker_name="OldChunker",
     )
 
-    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+    src = _source("test.txt")
+    src.content = BytesIO(b"file content")
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [src])
 
-    # full re-ingest, not chunk-reuse
-    assert ingest_calls == ["test.txt"]
-    assert fake.added == []
+    # full re-ingest via the phase machine (parsing -> embedding), not chunk-reuse:
+    # the old points were deleted and the source re-parsed from scratch
+    assert fake.deleted  # the old points were cleared
+    # final (embedding) store carries the fresh parse content and real vectors
+    final_points = fake.added[-1][1]
+    assert len(final_points) == 1
+    assert final_points[0].payload["page_content"] == "fresh parsed chunk"
+    assert len(final_points[0].vector) == FakeEmbedder.size
 
 
 async def test_inflight_embedding_phase_resumes_chunk_reuse(cheshire_cat, monkeypatch):
@@ -985,6 +1021,9 @@ async def test_inflight_embedding_phase_resumes_chunk_reuse(cheshire_cat, monkey
 async def test_inflight_parsing_phase_resumes_full_reingest(cheshire_cat, monkeypatch):
     """[restart] A processing row recorded at ``parsing_chunking`` resumes with a
     full re-ingest (the text was mid-parse/chunk when the pass died)."""
+    from io import BytesIO
+
+    import cat.core_plugins.efficient_ingestion.reembed as reembed_mod
     from cat.core_plugins.ingestion_status.registry import (
         PHASE_PARSING_CHUNKING,
         IngestionStatus,
@@ -993,7 +1032,12 @@ async def test_inflight_parsing_phase_resumes_full_reingest(cheshire_cat, monkey
     from cat.utils import get_nlp_object_name
 
     fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
-    ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+
+    async def fake_parse_and_chunk(ccat, rabbit_hole, source, file_bytes, content_type, cat):
+        return [Document(page_content="resumed parsed chunk")], []
+
+    monkeypatch.setattr(reembed_mod, "_parse_and_chunk", fake_parse_and_chunk)
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
     chunker = getattr(cheshire_cat, "chunker", None)
     chunker_name = (
         str(chunker.name) if chunker is not None and getattr(chunker, "name", None) else
@@ -1005,11 +1049,15 @@ async def test_inflight_parsing_phase_resumes_full_reingest(cheshire_cat, monkey
         phase=PHASE_PARSING_CHUNKING, chunker_name=chunker_name,
     )
 
-    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+    src = _source("test.txt")
+    src.content = BytesIO(b"file content")
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [src])
 
-    # full re-ingest, not chunk-reuse
-    assert ingest_calls == ["test.txt"]
-    assert fake.added == []
+    # full re-ingest (parsing -> embedding) via the phase machine, not chunk-reuse
+    final_points = fake.added[-1][1]
+    assert len(final_points) == 1
+    assert final_points[0].payload["page_content"] == "resumed parsed chunk"
+    assert len(final_points[0].vector) == FakeEmbedder.size
 
 
 async def test_inflight_embedding_phase_chunker_mismatch_full_reingest(cheshire_cat, monkeypatch):
@@ -1017,6 +1065,9 @@ async def test_inflight_embedding_phase_chunker_mismatch_full_reingest(cheshire_
     differs from the current one must NOT chunk-reuse: the stored chunks were
     produced by the OLD chunker, so it falls back to a full re-ingest
     (parsing_chunking) even though the recorded phase is embedding."""
+    from io import BytesIO
+
+    import cat.core_plugins.efficient_ingestion.reembed as reembed_mod
     from cat.core_plugins.ingestion_status.registry import (
         PHASE_EMBEDDING,
         IngestionStatus,
@@ -1024,7 +1075,12 @@ async def test_inflight_embedding_phase_chunker_mismatch_full_reingest(cheshire_
     )
 
     fake = FakeVectorHandler(points=[_record("test.txt", "chunk one")])
-    ingest_calls = await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
+
+    async def fake_parse_and_chunk(ccat, rabbit_hole, source, file_bytes, content_type, cat):
+        return [Document(page_content="fresh after chunker change")], []
+
+    monkeypatch.setattr(reembed_mod, "_parse_and_chunk", fake_parse_and_chunk)
+    await _install_embedder(cheshire_cat, monkeypatch, fake, FakeEmbedder())
     # row was re-embedding (embedding phase) when the chunker changed
     await set_status(
         agent_id, "agent", "test.txt",
@@ -1032,8 +1088,12 @@ async def test_inflight_embedding_phase_chunker_mismatch_full_reingest(cheshire_
         phase=PHASE_EMBEDDING, embedder_name="FakeEmbedder", chunker_name="OldChunker",
     )
 
-    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [_source("test.txt")])
+    src = _source("test.txt")
+    src.content = BytesIO(b"file content")
+    await reembed_sources(cheshire_cat, VectorMemoryType.DECLARATIVE, [src])
 
-    # full re-ingest (chunks invalidated by the chunker change), not chunk-reuse
-    assert ingest_calls == ["test.txt"]
-    assert fake.added == []
+    # full re-ingest (parsing -> embedding): chunks invalidated by the chunker change
+    final_points = fake.added[-1][1]
+    assert len(final_points) == 1
+    assert final_points[0].payload["page_content"] == "fresh after chunker change"
+    assert len(final_points[0].vector) == FakeEmbedder.size

@@ -774,19 +774,25 @@ async def test_ingest_file_survives_restart_via_resume(cheshire_cat, monkeypatch
     # the file is present on disk (persisted in phase 1)
     monkeypatch.setattr(cheshire_cat.file_manager, "read_file", lambda s, p: file_bytes)
 
-    calls = []
+    # phase 2 goes through the ONE phase machine: spy on it (it re-reads the
+    # persisted file and completes the source)
+    import cat.core_plugins.efficient_ingestion.resume as efficient_resume_mod
+    from cat.core_plugins.ingestion_status.registry import set_status as _set_status_c
 
-    async def fake_ingest_file(cat, file, metadata, filename=None, **kwargs):
-        calls.append((cat, file, filename))
-        await ingestion_plugin.after_rabbithole_stored_documents.function(filename, [object()], cat)
+    machine_calls = []
 
-    monkeypatch.setattr(cheshire_cat.lizard.rabbit_hole, "ingest_file", fake_ingest_file)
+    async def fake_machine(ccat, collection_name, stored_sources, stale_after=None):
+        for s in stored_sources:
+            machine_calls.append((str(collection_name), s.name))
+            await _set_status_c(ccat.agent_key, "agent", s.name, type_="file", status="completed", chat_id=None)
+
+    monkeypatch.setattr(efficient_resume_mod, "reembed_sources", fake_machine)
 
     await ingestion_resume._resume_agent(cheshire_cat.lizard, agent_key)
 
-    # the resume re-ingested the file exactly once (no "file missing" path)
-    assert len(calls) == 1
-    assert calls[0][2] == source
+    # the resume handed the source to the phase machine exactly once (no "file
+    # missing" path) and it completed
+    assert machine_calls == [("declarative", source)]
     doc = await get_status(agent_key, "agent", source)
     assert doc is not None
     assert doc["status"] == "completed"

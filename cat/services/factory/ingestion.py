@@ -24,14 +24,37 @@ _SELECTION_NAME = "ingestion_engine"
 
 
 class BaseIngestionEngine:
-    """Interface for the re-embed pass run on embedder change."""
+    """Interface for the ingestion engine.
+
+    The engine is the SEAM between the core and the plugins for the whole
+    ingestion lifecycle: the core routes (file upload, URL, batch) resolve the
+    configured engine and call ``ingest_file`` instead of calling
+    ``rabbit_hole.ingest_file`` directly, so a plugin can fully replace the
+    ingestion flow. The re-embed pass on embedder change is exposed via ``run``.
+    """
 
     async def run(self, lizard) -> bool:
         raise NotImplementedError
 
+    async def ingest_file(
+        self,
+        cat,
+        file,
+        filename: str | None = None,
+        metadata: dict | None = None,
+        store_file: bool = True,
+        content_type: str | None = None,
+    ) -> None:
+        raise NotImplementedError
+
 
 class CoreIngestionEngine(BaseIngestionEngine):
-    """Base implementation: the upstream-parity re-embed flow (core methods)."""
+    """Base implementation: the upstream-parity flow (core methods).
+
+    ``ingest_file`` wraps the original ``rabbit_hole.ingest_file`` (upstream
+    behavior, unchanged); ``run`` is the upstream-parity re-embed pass. This is
+    the engine that is resolved when no plugin overrides ingestion.
+    """
 
     async def run(self, lizard) -> bool:
         try:
@@ -40,6 +63,31 @@ class CoreIngestionEngine(BaseIngestionEngine):
         except Exception as e:  # noqa: BLE001 - parity with the core error handling
             log.error(f"Error embedding all stored files: {e}")
             return False
+
+    async def ingest_file(
+        self,
+        cat,
+        file,
+        filename: str | None = None,
+        metadata: dict | None = None,
+        store_file: bool = True,
+        content_type: str | None = None,
+    ) -> None:
+        """Delegate to the original core ingestion flow (upstream parity)."""
+        # local import: avoids a circular import at module load (RabbitHole
+        # imports factory concerns through the lizard, not the other way around;
+        # and the engine must stay import-safe for the core plugin manager)
+        from cat.rabbit_hole import RabbitHole
+
+        rabbit_hole = getattr(cat, "rabbit_hole", None) or RabbitHole()
+        await rabbit_hole.ingest_file(
+            cat=cat,
+            file=file,
+            filename=filename,
+            metadata=metadata or {},
+            store_file=store_file,
+            content_type=content_type,
+        )
 
 
 class BaseIngestionConfiguration(BaseFactoryConfigModel):
