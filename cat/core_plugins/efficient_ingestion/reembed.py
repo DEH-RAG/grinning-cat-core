@@ -29,10 +29,10 @@ import os
 import time
 import uuid
 
-from langchain_community.document_loaders.parsers.generic import MimeTypeBasedParser
 from langchain_core.documents import Document
 from langchain_core.documents.base import Blob
 
+from cat.core_plugins.base_plugin.parsers import MimeTypeBasedParser
 from cat.core_plugins.efficient_ingestion.ingestion_executor import (
     run_in_ingestion_executor,
 )
