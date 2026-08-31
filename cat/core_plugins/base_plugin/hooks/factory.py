@@ -40,6 +40,32 @@ def factory_allowed_llms(allowed: list[LLMSettings], cat) -> list:
 
 
 @hook(priority=0)
+def before_llm_settings_update(payload: dict, language_model_name: str, cat) -> dict:
+    """Hook to validate/enrich LLM settings before they are stored.
+
+    Called by the core right before the LLM settings payload is upserted (PUT
+    ``/llm/settings/{language_model_name}``). Plugins can use it to:
+
+    * validate the payload against provider-specific constraints (e.g. that
+      ``model`` is one of the models the provider actually serves);
+    * enrich the stored settings with provider-derived metadata (capabilities,
+      pricing) that the runtime needs (multimodal dispatch, context splitting,
+      accounting).
+
+    Args:
+        payload: the settings dict about to be stored.
+        language_model_name: the config class name being saved (e.g.
+            ``LLMOpenRouterConfig``).
+        cat: CheshireCat instance.
+
+    Returns:
+        The (possibly modified) payload that will be stored. If a plugin returns
+        ``None`` the original payload is kept.
+    """
+    return payload
+
+
+@hook(priority=0)
 def factory_allowed_embedders(allowed: list[EmbedderSettings], lizard) -> list:
     """Hook to extend list of supported embedders.
 
