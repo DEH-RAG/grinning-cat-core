@@ -32,7 +32,7 @@ def _cleanup():
 
 async def test_configuration_defaults():
     cfg = EfficientIngestionConfiguration()
-    assert cfg.model_dump() == {"reembed_max_concurrency": 5}
+    assert cfg.model_dump() == {"ingestion_max_concurrency": 5}
     assert cfg.pyclass() is EfficientIngestionEngine
 
 
@@ -43,7 +43,7 @@ async def test_resolved_default_prefers_plugin_engine(lizard):
 
     engine = await resolve_ingestion_engine(lizard)
     assert engine.__class__.__name__ == "EfficientIngestionEngine"
-    assert engine.reembed_max_concurrency == 5
+    assert engine.ingestion_max_concurrency == 5
 
 
 async def test_saved_config_is_the_single_selection(lizard):
@@ -72,16 +72,16 @@ async def test_upsert_stores_category_ingestion_and_value(lizard):
     from cat.services.factory.ingestion import build_factory
 
     sf = build_factory(lizard)
-    await sf.upsert_service("EfficientIngestionConfiguration", {"reembed_max_concurrency": 3})
+    await sf.upsert_service("EfficientIngestionConfiguration", {"ingestion_max_concurrency": 3})
 
     entry = await crud_settings.get_setting_by_name(DEFAULT_SYSTEM_KEY, "EfficientIngestionConfiguration")
     assert entry is not None
     assert entry["category"] == "ingestion"
-    assert entry["value"] == {"reembed_max_concurrency": 3}
+    assert entry["value"] == {"ingestion_max_concurrency": 3}
 
     engine = await resolve_ingestion_engine(lizard)
     assert engine.__class__.__name__ == "EfficientIngestionEngine"
-    assert engine.reembed_max_concurrency == 3
+    assert engine.ingestion_max_concurrency == 3
     _cleanup()
 
 
@@ -93,17 +93,17 @@ async def test_upsert_does_not_duplicate_category_entry(lizard):
     from cat.services.factory.ingestion import build_factory
 
     sf = build_factory(lizard)
-    await sf.upsert_service("EfficientIngestionConfiguration", {"reembed_max_concurrency": 3})
-    await sf.upsert_service("EfficientIngestionConfiguration", {"reembed_max_concurrency": 7})
+    await sf.upsert_service("EfficientIngestionConfiguration", {"ingestion_max_concurrency": 3})
+    await sf.upsert_service("EfficientIngestionConfiguration", {"ingestion_max_concurrency": 7})
 
     # exactly ONE entry with category "ingestion"
     db = get_sync_db()
     matches = db.json().get("system:agent", '$[?(@.category == "ingestion")]') or []
     assert len(matches) == 1
-    assert matches[0]["value"] == {"reembed_max_concurrency": 7}
+    assert matches[0]["value"] == {"ingestion_max_concurrency": 7}
 
     engine = await resolve_ingestion_engine(lizard)
-    assert engine.reembed_max_concurrency == 7
+    assert engine.ingestion_max_concurrency == 7
     _cleanup()
 
 
@@ -144,4 +144,27 @@ async def test_endpoints_list_and_select(secure_client, secure_client_headers, c
 
     listing2 = await secure_client.get("/ingestion/settings", headers=secure_client_headers)
     assert listing2.json()["selected_configuration"] == "BaseIngestionConfiguration"
+    _cleanup()
+
+
+async def test_legacy_reembed_max_concurrency_is_migrated(lizard):
+    """[migration] A config previously saved with ``reembed_max_concurrency``
+    (pre-rename, when the engine only handled the re-embed) keeps working: the
+    value is mapped onto ``ingestion_max_concurrency``."""
+    _cleanup()
+    from cat.db.database import DEFAULT_SYSTEM_KEY as _DS
+
+    # a PREVIOUSLY saved entry still in the DB uses the old field name
+    await crud_settings.upsert_setting_by_category(
+        _DS,
+        Setting(
+            name="EfficientIngestionConfiguration",
+            value={"reembed_max_concurrency": 8},
+            category="ingestion",
+        ),
+    )
+
+    engine = await resolve_ingestion_engine(lizard)
+    assert engine.__class__.__name__ == "EfficientIngestionEngine"
+    assert engine.ingestion_max_concurrency == 8
     _cleanup()
