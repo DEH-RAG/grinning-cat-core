@@ -397,7 +397,15 @@ class MadHatter:
 
     @property
     def get_untoggling_plugin_ids(self) -> List[str]:
-        return [self.get_base_core_plugin_id] + ["ingestion_status", "white_rabbit", "march_hare"]
+        # always-on core plugins: not only can they not be deactivated, they are
+        # force-added to every agent's active_plugins even when the stored list
+        # was customized without them (see load_active_plugins_ids_from_db).
+        # ingestion_status is here for the same reason; multimodal_ingestion is
+        # here so the extracted-image deletion cascade (before_file_manager_file_delete)
+        # is registered on pre-existing agents too, not only on freshly-created ones.
+        return [self.get_base_core_plugin_id] + [
+            "ingestion_status", "white_rabbit", "march_hare", "multimodal_ingestion",
+        ]
 
     @property
     def get_core_plugins_ids(self) -> List[str]:
