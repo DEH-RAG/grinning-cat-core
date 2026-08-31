@@ -1,11 +1,12 @@
-from typing import Type, Dict, Any, List, Literal
+from typing import Any, Dict, List, Literal, Type
+
 from pydantic import BaseModel
 
 from cat.db.cruds import settings as crud_settings
 from cat.exceptions import CustomValidationException
 from cat.log import log
 from cat.looking_glass.mad_hatter.mad_hatter import MadHatter
-from cat.routes.routes_utils import GetSettingsResponse, GetSettingResponse
+from cat.routes.routes_utils import GetSettingResponse, GetSettingsResponse
 from cat.services.factory.agentic_workflow import CoreAgenticWorkflowConfig
 from cat.services.factory.auth_handler import CoreAuthConfig
 from cat.services.factory.chunker import RecursiveTextChunkerSettings
@@ -34,7 +35,7 @@ class ServiceFactory:
             "llm",
             "vector_database",
             "agentic_workflow",
-            "re-ingestion",
+            "ingestion",
         ],
         schema_name: str,
     ):
@@ -56,7 +57,7 @@ class ServiceFactory:
             "file_manager": DummyFileManagerConfig,
             "llm": LLMDefaultConfig,
             "vector_database": QdrantConfig,
-            "re-ingestion": BaseIngestionConfiguration,
+            "ingestion": BaseIngestionConfiguration,
         }
 
     async def get_config_class_from_adapter(self, obj: Any) -> Type[BaseModel] | None:

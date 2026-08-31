@@ -98,6 +98,20 @@ def before_rabbithole_stores_documents(docs: List[Document], cat) -> List[Docume
 
 
 @hook(priority=0)
+def finalize_oversized_chunks(docs: List[Document], cat) -> List[Document]:
+    """Hook to finalize the chunk list so no chunk exceeds the embedder's limit.
+
+    Fired by the core RabbitHole after chunking/splitting (and by the
+    efficient_ingestion machine): the ``efficient_ingestion`` plugin implements
+    it, resolving the active embedder and splitting any oversized chunk into
+    budget-compliant sub-chunks (token-budget split, formerly a MyCAT-only core
+    method). The no-op default returns the docs unchanged (upstream parity: no
+    token-budget split).
+    """
+    return docs
+
+
+@hook(priority=0)
 def after_rabbithole_stored_documents(source, stored_points: List[PointStruct], cat) -> None:
     """Hook the Document after is inserted in the vector memory.
 

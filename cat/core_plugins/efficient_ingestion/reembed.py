@@ -36,6 +36,7 @@ from langchain_core.documents.base import Blob
 from cat.core_plugins.efficient_ingestion.ingestion_executor import (
     run_in_ingestion_executor,
 )
+from cat.core_plugins.efficient_ingestion.split import split_oversized
 from cat.core_plugins.ingestion_status.registry import (
     PHASE_EMBEDDING,
     PHASE_PARSING_CHUNKING,
@@ -271,7 +272,7 @@ async def _embed_phase(ccat, collection_name, source_name, source_points, embedd
             for p in source_points_text
         ]
         # Re-chunk only chunks exceeding the current embedder's input limit.
-        docs = rabbit_hole._split_oversized(docs, embedder)
+        docs = split_oversized(docs, embedder)
         vectors = await run_in_ingestion_executor(
             embedder.embed_documents, [d.page_content for d in docs]
         )
@@ -610,7 +611,7 @@ class EfficientIngestionEngine(BaseIngestionEngine):
     ``EfficientIngestionConfiguration``. Runs the same phase machine for fresh
     ingestion (via ``ingest_file``) and for the re-embed pass (via ``run``),
     writes the ingestion status through ``ingestion_status.registry`` and honors
-    a configurable concurrency cap (settings category ``re-ingestion``).
+    a configurable concurrency cap (settings category ``ingestion``).
     """
 
     def __init__(self, reembed_max_concurrency: int = 5, **kwargs):
@@ -726,7 +727,7 @@ class EfficientIngestionEngine(BaseIngestionEngine):
 
             # then re-embed every stored file/procedure, limiting concurrent
             # embeddings to avoid overwhelming resources (tunable via the plugin
-            # settings, category 're-ingestion')
+            # settings, category ingestion)
             semaphore = asyncio.Semaphore(self.reembed_max_concurrency)
 
             async def embed_with_limit(entry_):

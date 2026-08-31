@@ -1,7 +1,7 @@
 """Settings endpoints for the replaceable ingestion engine.
 
 The engine configuration is stored in the global ``system:agent`` settings
-list (category ``re-ingestion``) and served with the same shapes as the core
+list (category ``ingestion``) and served with the same shapes as the core
 ``/embedder/settings`` routes. SYSTEM READ/WRITE protected: plugin endpoints
 are public by default, so the permission dependency is mandatory.
 """
@@ -17,7 +17,6 @@ from cat.exceptions import CustomNotFoundException, CustomValidationException
 from cat.services.factory.ingestion import (
     build_factory,
     resolved_config_name,
-    store_selection,
 )
 
 
@@ -86,6 +85,7 @@ async def upsert_ingestion_setting(
         raise CustomValidationException("\n".join(err["msg"] for err in e.errors())) from e
 
     result = await sf.upsert_service(configuration_name, payload)
-    # the selected configuration becomes the explicit engine choice
-    await store_selection(configuration_name)
+    # selecting a configuration is automatic: the ingestion category holds a
+    # SINGLE setting (the active engine), exactly like the embedder category —
+    # upserting the config replaces it, no separate selection entry needed.
     return {"name": configuration_name, "value": result.get("value", payload)}
