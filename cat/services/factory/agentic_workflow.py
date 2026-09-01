@@ -83,8 +83,8 @@ class BaseAgenticWorkflowHandler(ABC):
 
         prompt = ChatPromptTemplate.from_messages([
             *([SystemMessagePromptTemplate.from_template(template=task.system_prompt)] if task.system_prompt else []),
-            HumanMessagePromptTemplate.from_template(template=task.user_prompt),
             *self._task.history,  # type: ignore[misc, union-attr]
+            HumanMessagePromptTemplate.from_template(template=task.user_prompt),
         ])
 
         # Attach recalled multimodal images (full image_url content parts) as a
