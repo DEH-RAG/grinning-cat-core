@@ -1,6 +1,8 @@
-from cat import hook, log, BillTheLizard, CatProcedureType
-from cat.core_plugins.white_rabbit.white_rabbit import WhiteRabbit
+from datetime import UTC, datetime
+
 import cat.db.cruds.settings as crud_settings
+from cat import BillTheLizard, hook, log
+from cat.core_plugins.white_rabbit.white_rabbit import WhiteRabbit
 
 scheduled_job_id = "re_embed_mcp_tools"
 
@@ -9,7 +11,7 @@ scheduled_job_id = "re_embed_mcp_tools"
 # pickle/serialize it by its fully qualified import path.
 # All runtime context is passed explicitly via kwargs.
 async def re_embed_mcp_tools():
-    """Re-embed MCP tools for all CheshireCat instances"""
+    """Re-embed all procedures (tools, forms, MCP clients) for all CheshireCat instances"""
     global scheduled_job_id
 
     lizard = BillTheLizard()
@@ -24,7 +26,7 @@ async def re_embed_mcp_tools():
             if (ccat := await lizard.get_cheshire_cat(ccat_id)) is None:
                 continue
             try:
-                await ccat.embed_procedures(pt=CatProcedureType.MCP)
+                await ccat.embed_procedures()
                 del ccat
             except Exception as e:
                 log.error(f"WhiteRabbit: Failed re-embedding for Cat {ccat_id}: {e}")
@@ -50,10 +52,13 @@ async def after_lizard_bootstrap(lizard: BillTheLizard):
     # schedule_interval_job uses replace_existing=True, so re-scheduling the same
     # job id is idempotent across the N workers that run this hook against the shared
     # RedisJobStore. No explicit get/remove needed (and get→remove→add is racy).
+    # start_date=now makes the first fire happen right after bootstrap (restart),
+    # then every `days` relative to that anchor.
     lizard.white_rabbit.schedule_interval_job(
         job=re_embed_mcp_tools,
         job_id=scheduled_job_id,
         days=interval_job_days,
+        start_date=datetime.now(UTC),
     )
 
 
