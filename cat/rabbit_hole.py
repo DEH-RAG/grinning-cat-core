@@ -11,9 +11,9 @@ from io import BytesIO
 from typing import Dict, List, Tuple
 
 from httpx import AsyncClient
-from langchain_community.document_loaders.parsers.generic import MimeTypeBasedParser
 from langchain_core.documents.base import Blob, Document
 
+from cat.core_plugins.base_plugin.parsers import MimeTypeBasedParser
 from cat.env import get_env_int
 from cat.log import log
 from cat.services.factory.chunker import BaseChunker

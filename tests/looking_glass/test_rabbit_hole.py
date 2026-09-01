@@ -3,9 +3,9 @@ import base64
 import types
 from io import BytesIO
 
-from langchain_community.document_loaders.parsers.generic import MimeTypeBasedParser
 from langchain_core.documents import Document
 
+from cat.core_plugins.base_plugin.parsers import MimeTypeBasedParser
 from cat.db.database import DEFAULT_SYSTEM_KEY
 from cat.rabbit_hole import RabbitHole
 from cat.services.factory.embedder import MultimodalEmbeddings
