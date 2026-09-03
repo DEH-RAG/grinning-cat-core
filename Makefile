@@ -76,13 +76,21 @@ update-requirements:
 	git pull
 	docker pull dhi.io/python:3.13-dev
 	uv lock --upgrade --python 3.13
-	# NOTE: --upgrade is required for `uv pip compile`, otherwise it treats the
-	# existing output file's pins as preferences and never tracks the new lock.
-	uv pip compile --upgrade --python-version 3.13 --extra plugins -o requirements-full.txt pyproject.toml
-	uv pip compile --upgrade -o requirements.txt pyproject.toml
-	# Model-prerequisites fragment: keep spacy+nltk pinnable standalone (early,
-	# cacheable model/nltk download in the image build).
-	@printf 'nltk==%s\nspacy==%s\n' \
-		"$$(grep -m1 '^nltk==' requirements-full.txt | cut -d= -f3)" \
-		"$$(grep -m1 '^spacy==' requirements-full.txt | cut -d= -f3)" > requirements-models.txt
+	# NOTE: --upgrade in `uv lock` is required to bump every dependency to the
+	# latest compatible release (same intent the old `uv pip compile --upgrade`
+	# had). The per-phase files are then exported from the SAME lock, so their
+	# pins stay perfectly aligned with each other AND with uv.lock.
+	#
+	# Dockerfile phases:
+	#   requirements-models.txt     -> L1 preinstall (spacy+nltk+models, stable)
+	#   requirements.txt            -> L2 core       (framework)
+	#   requirements-plugins.txt    -> L3 plugins    (changes most often)
+	#   requirements-full.txt       -> reference for the union of all three
+	uv export --python 3.13 --no-hashes --frozen --no-default-groups \
+		--group preinstall -o requirements-models.txt
+	uv export --python 3.13 --no-hashes --frozen --no-default-groups \
+		--group core -o requirements.txt
+	uv export --python 3.13 --no-hashes --frozen --no-default-groups \
+		--group plugins -o requirements-plugins.txt
+	uv export --python 3.13 --no-hashes --frozen -o requirements-full.txt
 

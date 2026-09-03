@@ -9,7 +9,30 @@ authors = [
     { name = "Piero Savastano" },
     { name = "Cheshire Cat AI Contributors" },
 ]
+
+# Dependencies are declared only as [dependency-groups] (one group per phase /
+# per plugin, plus super-groups below). `[project] dependencies` is intentionally
+# empty: keeping runtime deps here would make them un-prunable by phase and would
+# re-introduce the model-layer cache busting that the grouped layout solves.
+# `uv sync` (or `uv sync --group X`) installs the groups declared in
+# [tool.uv].default-groups below.
 dependencies = [
+]
+
+# ---------------------------------------------------------------------------
+# Dependency groups — one per phase / per plugin.
+#
+# The Dockerfile installs each phase from its own `requirements-*.txt` export:
+#   L1 preinstall  -> requirements-models.txt      (spacy+nltk+models, stable)
+#   L2 core        -> requirements.txt             (framework, changes rarely)
+#   L3 plugins     -> requirements-plugins.txt     (plugins, change often)
+# Because each layer's cache depends only on its own file, a bump in the plugin
+# layer never invalidates the (600 MB+) model layer. `uv export` guarantees the
+# per-phase files all draw from the SAME lock, so the union == the full set.
+# ---------------------------------------------------------------------------
+
+[dependency-groups]
+core = [
     "aiofiles",
     "asgi-lifespan",
     "autopep8",
@@ -50,49 +73,78 @@ dependencies = [
     "websockets",
 ]
 
-# Aggregated dependencies of every plugin deployed with this core
-# (external repos in ~/git/plugins + in-repo core_plugins). Keeping them in
-# the lock lets `uv sync --extra plugins` preinstall the whole runtime
-# environment (libraries + models) in one deterministic step.
-# Bounds are aligned across plugins: conflicting pins (e.g.
-# sentence-transformers==4.1.0 vs >=5.1.2, unstructured==0.18.1 vs >=0.22)
-# are resolved to the newer, shared versions.
-[project.optional-dependencies]
-plugins = [
-    # --- cat_alog ---
+# --- preinstall phase: spaCy runtime + NLTK --------------------------------
+# Only the spaCy/NLTK LIBRARIES are pinned here (exported to
+# requirements-models.txt and installed FIRST in the image). The trained
+# models (it_core_news_lg, en_core_web_lg, en_core_web_sm) are NOT published on
+# PyPI and are downloaded separately by `spacy download` in the Dockerfile L1
+# layer — because that layer uses `uv pip install` (which never prunes the
+# venv), the downloaded models survive the subsequent core/plugins layers, and
+# the ~600 MB model layer stays cached independently of core/plugin churn.
+spacy = [
+    "spacy>=3.8.14",
+]
+
+# NLTK runtime + corpora (punkt, averaged_perceptron_tagger are downloaded by
+# the layer, not shipped here).
+nltk = [
+    "nltk>=3.9.2",
+]
+
+# --- one group per plugin ---------------------------------------------------
+cat_alog = [
     "langchain-core>=1.3.0",
-    # --- cat-graphrag(.my) ---
+]
+
+cat_graphrag = [
     "langdetect>=1.0.9",
     "neo4j>=6.1.0",
-    "spacy>=3.8.14",
     "spacy-transformers>=1.4.0",
     "numpy>=2.4.4",
-    # --- cat-search ---
+]
+
+cat_search = [
     "googlesearch-python",
-    # --- cat_with_google_drive ---
+]
+
+cat_with_google_drive = [
     "google-api-python-client>=2.194.0",
     "google-api-python-client-stubs>=1.35.0",
     "google-auth-oauthlib>=1.3.1",
     "google-auth-httplib2>=0.3.1",
-    # --- cat-with-your-data ---
+]
+
+cat_with_your_data = [
     "langchain-experimental",
     "mysql-connector-python",
     "psycopg2-binary",
     "tabulate==0.9.0",
-    # --- ccat-reranker (aligned pins) ---
+]
+
+ccat_reranker = [
     "sentence-transformers>=5.1.2",
     "unstructured[all-docs]>=0.22",
-    # --- cc_prompt_settings ---
+]
+
+cc_prompt_settings = [
     "translate>=3.8.0",
-    # --- cc_scrapycat ---
+]
+
+cc_scrapycat = [
     "bs64",
     "crawl4ai[pdf]>=0.8.6",
-    # --- exercise-generator-plugin ---
+]
+
+exercise_generator = [
     "pandas>=3.0.2",
     "pydantic>=2.13.2",
-    # --- GC---Math-Solver ---
+]
+
+gc_math_solver = [
     "sympy",
-    # --- grinning_cat_plus(.my) ---
+]
+
+grinning_cat_plus = [
     "audioop-lts; python_version >= '3.13'",
     "azure-storage-blob>=12.27.0",
     "boto3>=1.40.57",
@@ -108,7 +160,6 @@ plugins = [
     "langchain-openai>=1.0.1",
     "langchain-unstructured>=0.1.6",
     "langchain-voyageai>=0.1.7",
-    "nltk>=3.9.2",
     "odfpy",
     "openpyxl>=3.1.0",
     "pdfminer-six>=20260107",
@@ -118,13 +169,44 @@ plugins = [
     "text-generation>=0.7.0",
     "xlrd>=2.0.1",
     "youtube-transcript-api>=1.2.3",
-    # --- grinning-cat-weaviate ---
+]
+
+grinning_cat_weaviate = [
     "weaviate-client",
-    # --- core_plugins/base_plugin ---
+]
+
+base_plugin = [
     "bs4",
     "pymupdf",
-    # --- core_plugins/white_rabbit ---
+]
+
+white_rabbit = [
     "apscheduler",
+]
+
+# ---------------------------------------------------------------------------
+# Super-groups (fused PEP 735 syntax: include-group references).
+# ---------------------------------------------------------------------------
+plugins = [
+    { include-group = "cat_alog" },
+    { include-group = "cat_graphrag" },
+    { include-group = "cat_search" },
+    { include-group = "cat_with_google_drive" },
+    { include-group = "cat_with_your_data" },
+    { include-group = "ccat_reranker" },
+    { include-group = "cc_prompt_settings" },
+    { include-group = "cc_scrapycat" },
+    { include-group = "exercise_generator" },
+    { include-group = "gc_math_solver" },
+    { include-group = "grinning_cat_plus" },
+    { include-group = "grinning_cat_weaviate" },
+    { include-group = "base_plugin" },
+    { include-group = "white_rabbit" },
+]
+
+preinstall = [
+    { include-group = "spacy" },
+    { include-group = "nltk" },
 ]
 
 [tool.coverage.run]
@@ -167,6 +249,10 @@ extend-ignore = ["E722", "F821", "E741"]
 
 [tool.uv]
 package = true
+# The full runtime a plain `uv sync` (dev / local) installs: framework + every
+# plugin's libraries + the spaCy/NLTK preinstall set. The Dockerfile instead
+# installs each phase from its own exported requirements file (cache isolation).
+default-groups = ["core", "plugins", "preinstall"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
