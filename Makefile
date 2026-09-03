@@ -41,7 +41,7 @@ install: ## Update the local virtual environment with the latest requirements.
 	@pip cache purge
 
 update: ## Update and compile requirements for the local virtual environment.
-	@uv sync --upgrade --link-mode=copy --no-install-project --no-cache --extra plugins
+	@uv sync --upgrade --link-mode=copy --no-install-project --no-cache
 	@uv cache clean
 	@pip cache purge
 	@rm -rf *.egg-info
@@ -86,11 +86,11 @@ update-requirements:
 	#   requirements.txt            -> L2 core       (framework)
 	#   requirements-plugins.txt    -> L3 plugins    (changes most often)
 	#   requirements-full.txt       -> reference for the union of all three
-	uv export --python 3.13 --no-hashes --frozen --no-default-groups \
+	uv export --python 3.13 --no-hashes --frozen --no-default-groups --no-emit-project \
 		--group preinstall -o requirements-models.txt
-	uv export --python 3.13 --no-hashes --frozen --no-default-groups \
+	uv export --python 3.13 --no-hashes --frozen --no-default-groups --no-emit-project \
 		--group core -o requirements.txt
-	uv export --python 3.13 --no-hashes --frozen --no-default-groups \
+	uv export --python 3.13 --no-hashes --frozen --no-default-groups --no-emit-project \
 		--group plugins -o requirements-plugins.txt
-	uv export --python 3.13 --no-hashes --frozen -o requirements-full.txt
+	uv export --python 3.13 --no-hashes --frozen --no-emit-project -o requirements-full.txt
 

@@ -87,6 +87,13 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --python .venv -r requirements-plugins.txt && \
     python3 scripts/hash_plugin_requirements.py
 
+# The project manifests must be present in /app for the RUNTIME stage: the
+# app (cat.main, plugin installs, `uv run` tooling) look for pyproject.toml
+# (and uv.lock) in the working directory. Copying them AFTER the 3 install
+# layers keeps their cache isolated: a pyproject/uv.lock change (i.e. ANY deps
+# bump) invalidates ONLY this layer, never the ~600 MB model/core/plugins layers.
+COPY pyproject.toml uv.lock ./
+
 # ---------------------------------------------------------------------------
 # Stage 2 — RUNTIME (final)
 # ---------------------------------------------------------------------------
