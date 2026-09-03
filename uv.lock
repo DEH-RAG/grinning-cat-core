@@ -1929,7 +1929,49 @@ wheels = [
 name = "grinning-cat"
 version = "2.0.1"
 source = { editable = "." }
-dependencies = [
+
+[package.dev-dependencies]
+base-plugin = [
+    { name = "bs4" },
+    { name = "pymupdf" },
+]
+cat-alog = [
+    { name = "langchain-core" },
+]
+cat-graphrag = [
+    { name = "langdetect" },
+    { name = "neo4j" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "spacy-transformers" },
+]
+cat-search = [
+    { name = "googlesearch-python" },
+]
+cat-with-google-drive = [
+    { name = "google-api-python-client" },
+    { name = "google-api-python-client-stubs" },
+    { name = "google-auth-httplib2" },
+    { name = "google-auth-oauthlib" },
+]
+cat-with-your-data = [
+    { name = "langchain-experimental" },
+    { name = "mysql-connector-python" },
+    { name = "psycopg2-binary" },
+    { name = "tabulate" },
+]
+cc-prompt-settings = [
+    { name = "translate" },
+]
+cc-scrapycat = [
+    { name = "bs64" },
+    { name = "crawl4ai", extra = ["pdf"] },
+]
+ccat-reranker = [
+    { name = "sentence-transformers" },
+    { name = "unstructured", extra = ["all-docs"] },
+]
+core = [
     { name = "aiofiles" },
     { name = "asgi-lifespan" },
     { name = "autopep8" },
@@ -1969,8 +2011,45 @@ dependencies = [
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
 ]
-
-[package.optional-dependencies]
+exercise-generator = [
+    { name = "pandas" },
+    { name = "pydantic" },
+]
+gc-math-solver = [
+    { name = "sympy" },
+]
+grinning-cat-plus = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "azure-storage-blob" },
+    { name = "boto3" },
+    { name = "fastembed" },
+    { name = "faster-whisper" },
+    { name = "google-cloud-storage" },
+    { name = "langchain-anthropic" },
+    { name = "langchain-cohere" },
+    { name = "langchain-google-genai" },
+    { name = "langchain-groq" },
+    { name = "langchain-mistralai" },
+    { name = "langchain-ollama" },
+    { name = "langchain-openai" },
+    { name = "langchain-unstructured" },
+    { name = "langchain-voyageai" },
+    { name = "odfpy" },
+    { name = "openpyxl" },
+    { name = "pdfminer-six" },
+    { name = "pydub" },
+    { name = "python-pptx" },
+    { name = "pytube" },
+    { name = "text-generation" },
+    { name = "xlrd" },
+    { name = "youtube-transcript-api" },
+]
+grinning-cat-weaviate = [
+    { name = "weaviate-client" },
+]
+nltk = [
+    { name = "nltk" },
+]
 plugins = [
     { name = "apscheduler" },
     { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
@@ -2001,7 +2080,6 @@ plugins = [
     { name = "langdetect" },
     { name = "mysql-connector-python" },
     { name = "neo4j" },
-    { name = "nltk" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "odfpy" },
@@ -2015,7 +2093,6 @@ plugins = [
     { name = "python-pptx" },
     { name = "pytube" },
     { name = "sentence-transformers" },
-    { name = "spacy" },
     { name = "spacy-transformers" },
     { name = "sympy" },
     { name = "tabulate" },
@@ -2026,101 +2103,184 @@ plugins = [
     { name = "xlrd" },
     { name = "youtube-transcript-api" },
 ]
+preinstall = [
+    { name = "nltk" },
+    { name = "spacy" },
+]
+spacy = [
+    { name = "spacy" },
+]
+white-rabbit = [
+    { name = "apscheduler" },
+]
 
 [package.metadata]
-requires-dist = [
+
+[package.metadata.requires-dev]
+base-plugin = [
+    { name = "bs4" },
+    { name = "pymupdf" },
+]
+cat-alog = [{ name = "langchain-core", specifier = ">=1.3.0" }]
+cat-graphrag = [
+    { name = "langdetect", specifier = ">=1.0.9" },
+    { name = "neo4j", specifier = ">=6.1.0" },
+    { name = "numpy", specifier = ">=2.4.4" },
+    { name = "spacy-transformers", specifier = ">=1.4.0" },
+]
+cat-search = [{ name = "googlesearch-python" }]
+cat-with-google-drive = [
+    { name = "google-api-python-client", specifier = ">=2.194.0" },
+    { name = "google-api-python-client-stubs", specifier = ">=1.35.0" },
+    { name = "google-auth-httplib2", specifier = ">=0.3.1" },
+    { name = "google-auth-oauthlib", specifier = ">=1.3.1" },
+]
+cat-with-your-data = [
+    { name = "langchain-experimental" },
+    { name = "mysql-connector-python" },
+    { name = "psycopg2-binary" },
+    { name = "tabulate", specifier = "==0.9.0" },
+]
+cc-prompt-settings = [{ name = "translate", specifier = ">=3.8.0" }]
+cc-scrapycat = [
+    { name = "bs64" },
+    { name = "crawl4ai", extras = ["pdf"], specifier = ">=0.8.6" },
+]
+ccat-reranker = [
+    { name = "sentence-transformers", specifier = ">=5.1.2" },
+    { name = "unstructured", extras = ["all-docs"], specifier = ">=0.22" },
+]
+core = [
     { name = "aiofiles" },
-    { name = "apscheduler", marker = "extra == 'plugins'" },
     { name = "asgi-lifespan" },
-    { name = "audioop-lts", marker = "python_full_version >= '3.13' and extra == 'plugins'" },
     { name = "autopep8" },
-    { name = "azure-storage-blob", marker = "extra == 'plugins'", specifier = ">=12.27.0" },
     { name = "bcrypt" },
     { name = "beautifulsoup4" },
-    { name = "boto3", marker = "extra == 'plugins'", specifier = ">=1.40.57" },
-    { name = "bs4", marker = "extra == 'plugins'" },
-    { name = "bs64", marker = "extra == 'plugins'" },
-    { name = "crawl4ai", extras = ["pdf"], marker = "extra == 'plugins'", specifier = ">=0.8.6" },
     { name = "cryptography" },
     { name = "fastapi" },
     { name = "fastapi-healthz", extras = ["redis"] },
-    { name = "fastembed", marker = "extra == 'plugins'", specifier = ">=0.7.3" },
-    { name = "faster-whisper", marker = "extra == 'plugins'" },
     { name = "fastmcp" },
     { name = "filetype" },
-    { name = "google-api-python-client", marker = "extra == 'plugins'", specifier = ">=2.194.0" },
-    { name = "google-api-python-client-stubs", marker = "extra == 'plugins'", specifier = ">=1.35.0" },
-    { name = "google-auth-httplib2", marker = "extra == 'plugins'", specifier = ">=0.3.1" },
-    { name = "google-auth-oauthlib", marker = "extra == 'plugins'", specifier = ">=1.3.1" },
-    { name = "google-cloud-storage", marker = "extra == 'plugins'", specifier = ">=3.4.1" },
-    { name = "googlesearch-python", marker = "extra == 'plugins'" },
     { name = "gunicorn" },
     { name = "httpx" },
     { name = "httpx-ws" },
     { name = "langchain" },
-    { name = "langchain-anthropic", marker = "extra == 'plugins'", specifier = ">=1.0.0" },
-    { name = "langchain-cohere", marker = "extra == 'plugins'", specifier = ">=0.4.6" },
-    { name = "langchain-core", marker = "extra == 'plugins'", specifier = ">=1.3.0" },
-    { name = "langchain-experimental", marker = "extra == 'plugins'" },
-    { name = "langchain-google-genai", marker = "extra == 'plugins'", specifier = ">=3.0.0" },
-    { name = "langchain-groq", marker = "extra == 'plugins'", specifier = ">=1.0.0" },
-    { name = "langchain-mistralai", marker = "extra == 'plugins'", specifier = ">=1.0.0" },
-    { name = "langchain-ollama", marker = "extra == 'plugins'", specifier = ">=1.0.0" },
-    { name = "langchain-openai", marker = "extra == 'plugins'", specifier = ">=1.0.1" },
-    { name = "langchain-unstructured", marker = "extra == 'plugins'", specifier = ">=0.1.6" },
-    { name = "langchain-voyageai", marker = "extra == 'plugins'", specifier = ">=0.1.7" },
-    { name = "langdetect", marker = "extra == 'plugins'", specifier = ">=1.0.9" },
     { name = "loguru" },
     { name = "lxml" },
-    { name = "mysql-connector-python", marker = "extra == 'plugins'" },
-    { name = "neo4j", marker = "extra == 'plugins'", specifier = ">=6.1.0" },
-    { name = "nltk", marker = "extra == 'plugins'", specifier = ">=3.9.2" },
-    { name = "numpy", marker = "extra == 'plugins'", specifier = ">=2.4.4" },
-    { name = "odfpy", marker = "extra == 'plugins'" },
-    { name = "openpyxl", marker = "extra == 'plugins'", specifier = ">=3.1.0" },
     { name = "pandas" },
-    { name = "pandas", marker = "extra == 'plugins'", specifier = ">=3.0.2" },
-    { name = "pdfminer-six", marker = "extra == 'plugins'", specifier = ">=20260107" },
     { name = "perflint" },
     { name = "pillow" },
-    { name = "psycopg2-binary", marker = "extra == 'plugins'" },
     { name = "pydantic" },
-    { name = "pydantic", marker = "extra == 'plugins'", specifier = ">=2.13.2" },
-    { name = "pydub", marker = "extra == 'plugins'" },
     { name = "pyjwt" },
     { name = "pylint" },
     { name = "pylint-actions" },
     { name = "pymupdf" },
-    { name = "pymupdf", marker = "extra == 'plugins'" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "python-multipart" },
-    { name = "python-pptx", marker = "extra == 'plugins'", specifier = ">=1.0.0" },
     { name = "python-slugify" },
-    { name = "pytube", marker = "extra == 'plugins'", specifier = ">=15.0.0" },
     { name = "qdrant-client" },
     { name = "rapidfuzz" },
     { name = "redis" },
     { name = "ruff" },
     { name = "scalar-fastapi" },
     { name = "scikit-learn" },
-    { name = "sentence-transformers", marker = "extra == 'plugins'", specifier = ">=5.1.2" },
-    { name = "spacy", marker = "extra == 'plugins'", specifier = ">=3.8.14" },
-    { name = "spacy-transformers", marker = "extra == 'plugins'", specifier = ">=1.4.0" },
-    { name = "sympy", marker = "extra == 'plugins'" },
-    { name = "tabulate", marker = "extra == 'plugins'", specifier = "==0.9.0" },
-    { name = "text-generation", marker = "extra == 'plugins'", specifier = ">=0.7.0" },
     { name = "tiktoken" },
     { name = "tomli" },
-    { name = "translate", marker = "extra == 'plugins'", specifier = ">=3.8.0" },
-    { name = "unstructured", extras = ["all-docs"], marker = "extra == 'plugins'", specifier = ">=0.22" },
     { name = "uvicorn", extras = ["standard"] },
-    { name = "weaviate-client", marker = "extra == 'plugins'" },
     { name = "websockets" },
-    { name = "xlrd", marker = "extra == 'plugins'", specifier = ">=2.0.1" },
-    { name = "youtube-transcript-api", marker = "extra == 'plugins'", specifier = ">=1.2.3" },
 ]
-provides-extras = ["plugins"]
+exercise-generator = [
+    { name = "pandas", specifier = ">=3.0.2" },
+    { name = "pydantic", specifier = ">=2.13.2" },
+]
+gc-math-solver = [{ name = "sympy" }]
+grinning-cat-plus = [
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "azure-storage-blob", specifier = ">=12.27.0" },
+    { name = "boto3", specifier = ">=1.40.57" },
+    { name = "fastembed", specifier = ">=0.7.3" },
+    { name = "faster-whisper" },
+    { name = "google-cloud-storage", specifier = ">=3.4.1" },
+    { name = "langchain-anthropic", specifier = ">=1.0.0" },
+    { name = "langchain-cohere", specifier = ">=0.4.6" },
+    { name = "langchain-google-genai", specifier = ">=3.0.0" },
+    { name = "langchain-groq", specifier = ">=1.0.0" },
+    { name = "langchain-mistralai", specifier = ">=1.0.0" },
+    { name = "langchain-ollama", specifier = ">=1.0.0" },
+    { name = "langchain-openai", specifier = ">=1.0.1" },
+    { name = "langchain-unstructured", specifier = ">=0.1.6" },
+    { name = "langchain-voyageai", specifier = ">=0.1.7" },
+    { name = "odfpy" },
+    { name = "openpyxl", specifier = ">=3.1.0" },
+    { name = "pdfminer-six", specifier = ">=20260107" },
+    { name = "pydub" },
+    { name = "python-pptx", specifier = ">=1.0.0" },
+    { name = "pytube", specifier = ">=15.0.0" },
+    { name = "text-generation", specifier = ">=0.7.0" },
+    { name = "xlrd", specifier = ">=2.0.1" },
+    { name = "youtube-transcript-api", specifier = ">=1.2.3" },
+]
+grinning-cat-weaviate = [{ name = "weaviate-client" }]
+nltk = [{ name = "nltk", specifier = ">=3.9.2" }]
+plugins = [
+    { name = "apscheduler" },
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "azure-storage-blob", specifier = ">=12.27.0" },
+    { name = "boto3", specifier = ">=1.40.57" },
+    { name = "bs4" },
+    { name = "bs64" },
+    { name = "crawl4ai", extras = ["pdf"], specifier = ">=0.8.6" },
+    { name = "fastembed", specifier = ">=0.7.3" },
+    { name = "faster-whisper" },
+    { name = "google-api-python-client", specifier = ">=2.194.0" },
+    { name = "google-api-python-client-stubs", specifier = ">=1.35.0" },
+    { name = "google-auth-httplib2", specifier = ">=0.3.1" },
+    { name = "google-auth-oauthlib", specifier = ">=1.3.1" },
+    { name = "google-cloud-storage", specifier = ">=3.4.1" },
+    { name = "googlesearch-python" },
+    { name = "langchain-anthropic", specifier = ">=1.0.0" },
+    { name = "langchain-cohere", specifier = ">=0.4.6" },
+    { name = "langchain-core", specifier = ">=1.3.0" },
+    { name = "langchain-experimental" },
+    { name = "langchain-google-genai", specifier = ">=3.0.0" },
+    { name = "langchain-groq", specifier = ">=1.0.0" },
+    { name = "langchain-mistralai", specifier = ">=1.0.0" },
+    { name = "langchain-ollama", specifier = ">=1.0.0" },
+    { name = "langchain-openai", specifier = ">=1.0.1" },
+    { name = "langchain-unstructured", specifier = ">=0.1.6" },
+    { name = "langchain-voyageai", specifier = ">=0.1.7" },
+    { name = "langdetect", specifier = ">=1.0.9" },
+    { name = "mysql-connector-python" },
+    { name = "neo4j", specifier = ">=6.1.0" },
+    { name = "numpy", specifier = ">=2.4.4" },
+    { name = "odfpy" },
+    { name = "openpyxl", specifier = ">=3.1.0" },
+    { name = "pandas", specifier = ">=3.0.2" },
+    { name = "pdfminer-six", specifier = ">=20260107" },
+    { name = "psycopg2-binary" },
+    { name = "pydantic", specifier = ">=2.13.2" },
+    { name = "pydub" },
+    { name = "pymupdf" },
+    { name = "python-pptx", specifier = ">=1.0.0" },
+    { name = "pytube", specifier = ">=15.0.0" },
+    { name = "sentence-transformers", specifier = ">=5.1.2" },
+    { name = "spacy-transformers", specifier = ">=1.4.0" },
+    { name = "sympy" },
+    { name = "tabulate", specifier = "==0.9.0" },
+    { name = "text-generation", specifier = ">=0.7.0" },
+    { name = "translate", specifier = ">=3.8.0" },
+    { name = "unstructured", extras = ["all-docs"], specifier = ">=0.22" },
+    { name = "weaviate-client" },
+    { name = "xlrd", specifier = ">=2.0.1" },
+    { name = "youtube-transcript-api", specifier = ">=1.2.3" },
+]
+preinstall = [
+    { name = "nltk", specifier = ">=3.9.2" },
+    { name = "spacy", specifier = ">=3.8.14" },
+]
+spacy = [{ name = "spacy", specifier = ">=3.8.14" }]
+white-rabbit = [{ name = "apscheduler" }]
 
 [[package]]
 name = "groq"

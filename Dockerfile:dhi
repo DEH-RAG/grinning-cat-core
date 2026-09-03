@@ -53,11 +53,14 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # 1) Early, cacheable model layer: COPY the pinned requirements file ALONE, then
-#    create the venv, install ONLY spacy+nltk and pre-download the spaCy models
-#    and NLTK data. By keeping the other manifests (pyproject.toml, uv.lock) and
-#    the plugin sources OUT of this layer's inputs, a dep bump or core_plugins
-#    change does NOT invalidate it — the heavy model downloads are reused across
-#    builds, rebuilding only when requirements-models.txt itself changes.
+#    create the venv, install ONLY spacy+nltk, and pre-download the spaCy
+#    models + NLTK data. By keeping the other manifests (pyproject.toml,
+#    uv.lock, requirements.txt, requirements-plugins.txt) OUT of this layer's
+#    inputs, a dep bump or core_plugins change does NOT invalidate it — the
+#    heavy model downloads are reused across builds, rebuilding only when
+#    requirements-models.txt itself changes.
+# `uv pip install` never prunes the venv, so the preinstall set AND the models
+# downloaded by `spacy download` survive the subsequent core/plugins layers.
 # NLTK data stays under /app/nltk_data (survives the non-root switch) and egress
 #    uses the trusted build proxy (NLTK_ALLOW_PROXIED_URLOPEN=1).
 COPY requirements-models.txt ./
@@ -69,18 +72,19 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     spacy download en_core_web_sm && \
     python -m nltk.downloader -d /app/nltk_data punkt averaged_perceptron_tagger
 
-# 2) Manifests + plugin sources come AFTER the model layer, so only the sync
-#    below rebuilds when they change (spacy+nltk and the model data are already
-# present in the venv and match the lock, so this step stays clean).
-COPY pyproject.toml uv.lock ./
+# 2) Core layer: framework deps only. Depends solely on requirements.txt, so a
+#    plugin bump never rebuilds it and a core bump never re-downloads models.
+COPY requirements.txt ./
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --python .venv -r requirements.txt
+
+# 3) Plugins layer: everything plugin-related (libraries + their requirements
+#    hashes). Changes most often; isolated from 1) and 2).
+COPY requirements-plugins.txt ./
 COPY ./cat/core_plugins ./cat/core_plugins
 COPY ./scripts/hash_plugin_requirements.py ./scripts/hash_plugin_requirements.py
-
-# 3) Full deterministic install of core + all plugin extras.
-#    (No trailing cache-cleanup RUN needed: the uv cache lives in a build
-#    cache mount below /root/.cache, which is not part of the image layers.)
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev --extra plugins && \
+    uv pip install --python .venv -r requirements-plugins.txt && \
     python3 scripts/hash_plugin_requirements.py
 
 # ---------------------------------------------------------------------------
